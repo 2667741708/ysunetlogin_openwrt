@@ -1,0 +1,25 @@
+{
+  "listen": "0.0.0.0",
+  "port": 8765,
+  "tls_cert": "lan_gui.crt",
+  "tls_key": "lan_gui.key",
+  "allow_insecure_http": false,
+  "ssh_timeout": 20,
+  "session_minutes": 480,
+  "servers": [
+    {
+      "id": "c201-4090",
+      "name": "4090 服务器",
+      "ssh_target": "c201-4090",
+      "expected_hostname": "a-MS-7E06",
+      "script": "/home/a/网络登录服务器管理/ysunetlogin_openwrt/netlogin.py"
+    },
+    {
+      "id": "c201-5080",
+      "name": "5080 服务器",
+      "ssh_target": "c201-5080",
+      "expected_hostname": "c201-MS-7E06",
+      "script": "/home/c201/网络登录服务器管理/ysunetlogin_openwrt/netlogin.py"
+    }
+  ]
+}

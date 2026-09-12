@@ -1,3 +1,14 @@
 __pycache__/
 *.py[cod]
 *.log
+lan_gui.crt
+lan_gui.key
+lan_gui_config.json
+ysunetlogin_openwrt-source-*.zip
+build/
+build-fixed/
+dist/
+build-secure/
+dist-secure/
+release/
+*.spec

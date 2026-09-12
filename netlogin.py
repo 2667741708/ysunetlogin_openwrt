@@ -8,6 +8,7 @@ import binascii
 import subprocess
 import time
 import ssl
+import io
 
 
 if sys.version_info < (3, 0):
@@ -152,6 +153,32 @@ def read_text(response):
         except UnicodeDecodeError:
             pass
     return body.decode('utf-8', 'replace')
+
+
+def load_account_credentials(path, account_name):
+    with io.open(path, 'r', encoding='utf-8-sig') as handle:
+        config = json.load(handle)
+
+    candidates = []
+    if isinstance(config, dict):
+        if isinstance(config.get('accounts'), list):
+            candidates.extend(config.get('accounts'))
+        elif account_name and isinstance(config.get(account_name), dict):
+            item = dict(config.get(account_name))
+            item.setdefault('name', account_name)
+            candidates.append(item)
+
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        if item.get('name') == account_name:
+            user = item.get('username') or item.get('user') or item.get('userId')
+            pwd = item.get('password') or item.get('pwd')
+            if not user or not pwd:
+                raise ValueError('账号配置缺少 username/password 字段')
+            return text_value(user), text_value(pwd)
+
+    raise ValueError('未找到账号配置：%s' % account_name)
 
 
 # 封装post请求
@@ -383,6 +410,383 @@ class Netlogin():
         except ValueError:
             return {}
 
+    def _auth1_session_info(self, openers):
+        info = {
+            'sessionId': '',
+            'source': '',
+            'url': '',
+            'portalUrl': '',
+            'errors': [],
+        }
+
+        try:
+            response = self._session_request(openers, AUTH1_HOST + '/',
+                                             headers=self.header,
+                                             timeout=DEFAULT_TIMEOUT * 2)
+            url = response.geturl()
+            info['url'] = url
+            info['sessionId'] = self._query_dict(url).get('sessionId', '')
+            if info['sessionId']:
+                info['source'] = 'auth1-root'
+                return info
+        except Exception as e:
+            info['errors'].append('auth1-root: %s' % text_value(e))
+
+        try:
+            portal_url = self._find_auth1_portal_url(openers)
+            info['portalUrl'] = portal_url or ''
+            if portal_url:
+                response = self._session_request(openers, portal_url,
+                                                 headers=self.header,
+                                                 timeout=DEFAULT_TIMEOUT * 2)
+                url = response.geturl()
+                info['url'] = url
+                info['sessionId'] = self._query_dict(url).get('sessionId', '')
+                if info['sessionId']:
+                    info['source'] = 'portal-redirect'
+        except Exception as e:
+            info['errors'].append('portal-redirect: %s' % text_value(e))
+
+        return info
+
+    def _brief_devices(self, online_devices):
+        brief_devices = []
+        for item in online_devices:
+            if not isinstance(item, dict):
+                continue
+            service = (item.get('service') or item.get('serviceName') or
+                       item.get('realServiceName') or item.get('operatorName') or
+                       item.get('ispName') or item.get('productName') or '')
+            brief_devices.append({
+                'ip': item.get('userIpv4') or item.get('nodeIp') or '',
+                'mac': item.get('userMac') or item.get('nodeMac') or '',
+                'deviceName': item.get('deviceName') or '',
+                'deviceType': item.get('deviceType') or item.get('nodeType') or '',
+                'accessTime': item.get('accessTime') or item.get('authenticationTime') or '',
+                'onlineDuration': item.get('onlineDuration') or '',
+                'currentDevice': item.get('currentDevice'),
+                'onlineUserUuid': item.get('onlineUserUuid') or item.get('userObjectId') or '',
+                'service': service,
+                'serviceSource': 'findDevice' if service else 'not-returned-by-findDevice',
+            })
+        return brief_devices
+
+    def _auth1_status_summary(self, status):
+        online_info = status.get('online') or {}
+        data = online_info.get('data') or {}
+        portal_info = data.get('portalOnlineUserInfo') or {}
+        online_user = data.get('onlineUser') or {}
+        devices_data = (status.get('devices') or {}).get('data') or {}
+        online_devices = devices_data.get('onlineDevices') or []
+
+        result = portal_info.get('result')
+        is_online = result == 'success'
+        if result == 'fail':
+            state = 'offline'
+        elif is_online:
+            state = 'online'
+        elif status.get('internetOnline') is True and not status.get('auth1Session', {}).get('sessionId'):
+            state = 'internet-online-auth-unknown'
+        else:
+            state = 'unknown'
+
+        brief_devices = self._brief_devices(online_devices)
+
+        return {
+            'state': state,
+            'online': is_online,
+            'message': portal_info.get('message') or online_info.get('message') or '',
+            'userId': portal_info.get('userId') or portal_info.get('userName') or online_user.get('userName') or '',
+            'userName': portal_info.get('userName') or online_user.get('userName') or '',
+            'service': portal_info.get('service') or portal_info.get('realServiceName') or '',
+            'userIp': portal_info.get('userIp') or online_user.get('nodeIp') or '',
+            'ssid': portal_info.get('ssid') or '',
+            'location': online_user.get('nodePhysicalLocation') or '',
+            'authenticationTime': online_user.get('authenticationTime') or '',
+            'deviceCount': len(brief_devices),
+            'devices': brief_devices,
+        }
+
+    def _account_status_summary(self, status):
+        devices_data = (status.get('devices') or {}).get('data') or {}
+        online_devices = devices_data.get('onlineDevices') or []
+        offline_devices = devices_data.get('offlineDevices') or []
+        brief_devices = self._brief_devices(online_devices)
+
+        online_summary = self._auth1_status_summary({
+            'online': status.get('online') or {},
+            'devices': status.get('devices') or {},
+            'internetOnline': None,
+            'auth1Session': status.get('auth1Session') or {},
+        })
+        current_user = online_summary.get('userId') or online_summary.get('userName') or ''
+        current_service = online_summary.get('service') or ''
+        current_ip = online_summary.get('userIp') or ''
+        target_user = status.get('account') or ''
+
+        for item in brief_devices:
+            if item.get('service'):
+                continue
+            if (current_service and current_ip and item.get('ip') == current_ip
+                    and (not target_user or current_user == target_user)):
+                item['service'] = current_service
+                item['serviceSource'] = 'current-session'
+
+        return {
+            'account': target_user,
+            'casLoginOk': bool((status.get('casLogin') or {}).get('ok')),
+            'onlineDeviceCount': len(brief_devices),
+            'offlineDeviceCount': len(offline_devices),
+            'devices': brief_devices,
+            'currentSession': online_summary,
+            'serviceUnknownCount': len([item for item in brief_devices
+                                        if not item.get('service')]),
+            'note': ('auth1 的 findDevice 设备列表当前未包含每台设备的运营商；'
+                     '只有当前出口设备可用 getOnlineUserInfo 补齐服务名。'),
+        }
+
+    def current_status(self):
+        '''
+        只读查询当前出口的认证状态，不执行登录、下线或踢设备。
+        '''
+        status = {
+            'changed': False,
+            'internetOnline': None,
+            'queryStringFound': False,
+            'auth1Session': {},
+            'online': {},
+            'devices': {},
+            'offlineAccount': {},
+            'errors': [],
+        }
+
+        try:
+            status['internetOnline'] = self.tst_net()
+            status['queryStringFound'] = bool(self.queryString)
+        except Exception as e:
+            status['errors'].append('tst_net: %s' % text_value(e))
+
+        openers = self._new_cookie_openers()
+        session_info = self._auth1_session_info(openers)
+        status['auth1Session'] = session_info
+        session_id = session_info.get('sessionId') or ''
+
+        if session_id:
+            quoted_session = quote(session_id)
+            probes = [
+                ('online',
+                 '/eportal/adaptor/getOnlineUserInfo?sessionId=' + quoted_session,
+                 None,
+                 'GET'),
+                ('devices',
+                 '/eportal/adaptor/devices/findDevice',
+                 {'sessionId': session_id},
+                 'POST'),
+                ('offlineAccount',
+                 '/eportal/operator/offlineAccountData',
+                 {'sessionId': session_id},
+                 'POST'),
+            ]
+            for key, path, data, method in probes:
+                try:
+                    status[key] = self._session_json(openers, path,
+                                                     data=data,
+                                                     method=method)
+                except Exception as e:
+                    status['errors'].append('%s: %s' % (key, text_value(e)))
+
+        status['summary'] = self._auth1_status_summary(status)
+        return status
+
+    def print_current_status(self, status):
+        summary = status.get('summary') or {}
+        state_map = {
+            'online': '在线',
+            'offline': '未登录/离线',
+            'unknown': '未知',
+            'internet-online-auth-unknown': '外网可达，但未拿到 auth1 认证会话',
+        }
+        print('状态：%s' % state_map.get(summary.get('state'), summary.get('state') or '未知'))
+        if summary.get('userId'):
+            print('账号：%s' % summary.get('userId'))
+        if summary.get('service'):
+            print('服务：%s' % summary.get('service'))
+        if summary.get('userIp'):
+            print('IP：%s' % summary.get('userIp'))
+        if summary.get('ssid'):
+            print('SSID：%s' % summary.get('ssid'))
+        if summary.get('location'):
+            print('位置：%s' % summary.get('location'))
+        if summary.get('authenticationTime'):
+            print('上线时间：%s' % summary.get('authenticationTime'))
+        if summary.get('message') and not summary.get('online'):
+            print('认证信息：%s' % summary.get('message'))
+
+        print('在线设备数：%s' % summary.get('deviceCount', 0))
+        for index, item in enumerate(summary.get('devices') or [], 1):
+            parts = []
+            for key in ('ip', 'deviceName', 'deviceType', 'accessTime', 'onlineDuration'):
+                if item.get(key):
+                    parts.append('%s=%s' % (key, item.get(key)))
+            print('  %s. %s' % (index, ', '.join(parts) if parts else item))
+
+        if status.get('errors'):
+            print('查询警告：%s' % '；'.join(status.get('errors')))
+
+    def account_status(self, user, pwd):
+        '''
+        只读查询指定账号的在线设备列表。
+        只执行 CAS 登录以获得账号会话，不执行 serviceLogin、注销或踢设备。
+        '''
+        status = {
+            'changed': False,
+            'account': user,
+            'auth1Session': {},
+            'casLogin': {},
+            'online': {},
+            'devices': {},
+            'offlineAccount': {},
+            'errors': [],
+        }
+
+        ok, cas_info, openers = self._cas_login_only(user, pwd)
+        status['casLogin'] = cas_info
+        session_id = cas_info.get('sessionId') or ''
+        status['auth1Session'] = {
+            'sessionId': session_id,
+            'source': cas_info.get('source') or '',
+            'url': cas_info.get('portalUrl') or '',
+        }
+        if not ok:
+            status['errors'].append(cas_info.get('message') or 'CAS 登录失败')
+            status['summary'] = self._account_status_summary(status)
+            return status
+
+        quoted_session = quote(session_id)
+        probes = [
+            ('online',
+             '/eportal/adaptor/getOnlineUserInfo?sessionId=' + quoted_session,
+             None,
+             'GET'),
+            ('devices',
+             '/eportal/adaptor/devices/findDevice',
+             {'sessionId': session_id},
+             'POST'),
+            ('offlineAccount',
+             '/eportal/operator/offlineAccountData',
+             {'sessionId': session_id},
+             'POST'),
+        ]
+        for key, path, data, method in probes:
+            try:
+                status[key] = self._session_json(openers, path,
+                                                 data=data,
+                                                 method=method)
+            except Exception as e:
+                status['errors'].append('%s: %s' % (key, text_value(e)))
+
+        status['summary'] = self._account_status_summary(status)
+        return status
+
+    def account_offline_devices(self, user, pwd, online_user_uuids=None):
+        '''
+        使用账号会话踢掉指定在线设备。online_user_uuids 为空时踢掉该账号全部在线设备。
+        '''
+        result = {
+            'changed': False,
+            'account': user,
+            'requestedUuids': online_user_uuids or [],
+            'targetUuids': [],
+            'kick': {},
+            'errors': [],
+        }
+        status = self.account_status(user, pwd)
+        result['before'] = status
+        if not (status.get('summary') or {}).get('casLoginOk'):
+            result['errors'].append((status.get('casLogin') or {}).get('message') or 'CAS 登录失败')
+            result['summary'] = self._account_offline_summary(result)
+            return result
+
+        online_devices = (((status.get('devices') or {}).get('data') or {}).get('onlineDevices') or [])
+        requested = set(online_user_uuids or [])
+        target_uuids = []
+        for item in online_devices:
+            uuid_value = item.get('onlineUserUuid') or item.get('userObjectId') or ''
+            if uuid_value and (not requested or uuid_value in requested):
+                target_uuids.append(uuid_value)
+        result['targetUuids'] = target_uuids
+        if not target_uuids:
+            result['summary'] = self._account_offline_summary(result)
+            return result
+
+        ok, cas_info, openers = self._cas_login_only(user, pwd)
+        if not ok:
+            result['errors'].append(cas_info.get('message') or 'CAS 登录失败')
+            result['summary'] = self._account_offline_summary(result)
+            return result
+        session_id = cas_info.get('sessionId') or ''
+        if not session_id:
+            result['errors'].append('未获得 auth1 sessionId')
+            result['summary'] = self._account_offline_summary(result)
+            return result
+        try:
+            result['kick'] = self._session_json(
+                openers,
+                '/eportal/adaptor/kick-offline/batch',
+                {'sessionId': session_id, 'onlineUserUuids': target_uuids},
+                method='POST')
+            result['changed'] = (result['kick'].get('code') == 200 and
+                                 text_value(result['kick'].get('message')).lower() == 'ok')
+            if not result['changed']:
+                result['errors'].append(result['kick'].get('message') or '踢设备接口返回失败')
+        except Exception as e:
+            result['errors'].append(text_value(e))
+        result['summary'] = self._account_offline_summary(result)
+        return result
+
+    def _account_offline_summary(self, result):
+        return {
+            'account': result.get('account') or '',
+            'requestedCount': len(result.get('requestedUuids') or []),
+            'targetCount': len(result.get('targetUuids') or []),
+            'changed': bool(result.get('changed')),
+            'message': ((result.get('kick') or {}).get('message') or
+                        ('未找到需要下线的在线设备' if not result.get('targetUuids') else '下线失败')),
+            'errors': result.get('errors') or [],
+        }
+
+    def print_account_status(self, status):
+        summary = status.get('summary') or {}
+        print('账号：%s' % (summary.get('account') or status.get('account') or ''))
+        if not summary.get('casLoginOk'):
+            message = (status.get('casLogin') or {}).get('message') or 'CAS 登录失败'
+            print('账号查询登录：失败（%s）' % message)
+        else:
+            print('账号查询登录：成功（只读 CAS 会话，未执行运营商登录/下线）')
+
+        print('在线设备数：%s' % summary.get('onlineDeviceCount', 0))
+        for index, item in enumerate(summary.get('devices') or [], 1):
+            parts = []
+            for key in ('ip', 'deviceName', 'deviceType', 'accessTime', 'onlineDuration'):
+                if item.get(key):
+                    parts.append('%s=%s' % (key, item.get(key)))
+            service = item.get('service')
+            if service:
+                if item.get('serviceSource') == 'current-session':
+                    parts.append('service=%s(当前出口补齐)' % service)
+                else:
+                    parts.append('service=%s' % service)
+            else:
+                parts.append('service=接口未返回')
+            print('  %s. %s' % (index, ', '.join(parts) if parts else item))
+
+        if summary.get('offlineDeviceCount'):
+            print('离线设备记录数：%s' % summary.get('offlineDeviceCount'))
+        if summary.get('serviceUnknownCount'):
+            print('提示：%s' % summary.get('note'))
+        if status.get('errors'):
+            print('查询警告：%s' % '；'.join(status.get('errors')))
+
     def _extract_auth1_url(self, text_or_url):
         if not text_or_url:
             return None
@@ -443,6 +847,104 @@ class Netlogin():
             cas_params['mode'] = params.get('mode')
         return AUTH1_HOST + '/cas-sso/login?' + urlencode(cas_params), params
 
+    def _cas_login_only(self, user, pwd):
+        if not user or not pwd:
+            return (False, {
+                'ok': False,
+                'message': '用户名或密码为空',
+                'sessionId': '',
+            }, None)
+
+        openers = self._new_cookie_openers()
+        session_info = self._auth1_session_info(openers)
+        portal_main_url = session_info.get('url') or ''
+        source = session_info.get('source') or ''
+
+        if not session_info.get('sessionId'):
+            portal_url = self._find_auth1_portal_url(openers)
+            if not portal_url:
+                return (False, {
+                    'ok': False,
+                    'message': '未检测到 auth1 新认证页面',
+                    'sessionId': '',
+                    'source': source,
+                    'errors': session_info.get('errors') or [],
+                }, openers)
+            response = self._session_request(openers, portal_url,
+                                             headers=self.header,
+                                             timeout=DEFAULT_TIMEOUT * 2)
+            portal_main_url = response.geturl()
+            source = 'portal-redirect'
+
+        cas_url, portal_params = self._build_cas_url(portal_main_url)
+        session_id = portal_params.get('sessionId') or session_info.get('sessionId') or ''
+        if not session_id:
+            return (False, {
+                'ok': False,
+                'message': 'auth1 新认证未返回 sessionId',
+                'sessionId': '',
+                'source': source,
+                'portalUrl': portal_main_url,
+            }, openers)
+
+        cas_response = self._session_request(openers, cas_url, headers=self.header)
+        cas_html = read_text(cas_response)
+        key = self._parse_html_id(cas_html, 'login-croypto')
+        execution = self._parse_html_id(cas_html, 'login-page-flowkey')
+        if not key or not execution:
+            return (False, {
+                'ok': False,
+                'message': 'auth1 CAS 页面缺少加密参数',
+                'sessionId': session_id,
+                'source': source,
+                'portalUrl': portal_main_url,
+            }, openers)
+
+        post_url = self._set_query_param(cas_response.geturl(),
+                                         'accept-language', 'zh-CN')
+        login_data = {
+            'username': user,
+            'type': 'UsernamePassword',
+            '_eventId': 'submit',
+            'geolocation': '',
+            'execution': execution,
+            'captcha_code': '',
+            'rememberMe': 'false',
+            'croypto': key,
+            'password': self._aes_encrypt_b64(key, pwd),
+            'captcha_payload': self._aes_encrypt_b64(key, '{}'),
+        }
+        headers = dict(self.header)
+        headers.update({
+            'Origin': AUTH1_HOST,
+            'Referer': cas_response.geturl(),
+        })
+        login_response = self._session_request(openers, post_url, headers=headers,
+                                               data=login_data,
+                                               allow_redirects=False,
+                                               timeout=DEFAULT_TIMEOUT * 2)
+        location = get_header(login_response, 'Location', '')
+        if response_code(login_response) not in REDIRECT_CODES or 'auth-success' not in location:
+            detail = read_text(login_response)
+            return (False, {
+                'ok': False,
+                'message': 'auth1 CAS 登录失败：%s' % (detail[:160] or '未返回成功跳转'),
+                'sessionId': session_id,
+                'source': source,
+                'portalUrl': portal_main_url,
+            }, openers)
+
+        self._session_request(openers, urljoin(post_url, location),
+                              headers=self.header,
+                              timeout=DEFAULT_TIMEOUT * 2)
+        return (True, {
+            'ok': True,
+            'message': 'CAS 登录成功，仅建立账号查询会话',
+            'sessionId': session_id,
+            'source': source,
+            'portalUrl': portal_main_url,
+        }, openers)
+
     def _set_query_param(self, url, key, value):
         parts = urlsplit(url)
         query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
@@ -474,6 +976,18 @@ class Netlogin():
             return encoded.decode('ascii') if VERSION == 3 else encoded
         except Exception:
             pass
+
+        # The Windows desktop bundle already includes cryptography. Reuse it
+        # when PyCryptodome or the OpenSSL command-line tool is unavailable.
+        try:
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        except ImportError:
+            pass
+        else:
+            encryptor = Cipher(algorithms.AES(key), modes.ECB()).encryptor()
+            encrypted = encryptor.update(data) + encryptor.finalize()
+            encoded = base64.b64encode(encrypted)
+            return encoded.decode('ascii') if VERSION == 3 else encoded
 
         proc = subprocess.Popen(
             ['openssl', 'enc', '-aes-128-ecb', '-base64',
@@ -740,19 +1254,68 @@ class Netlogin():
 
         return self.alldata
 
+    def _logout_auth1(self):
+        openers = self._new_cookie_openers()
+        try:
+            response = self._session_request(openers, AUTH1_HOST + '/',
+                                             headers=self.header,
+                                             timeout=DEFAULT_TIMEOUT * 2)
+            session_id = self._query_dict(response.geturl()).get('sessionId', '')
+        except Exception as e:
+            return (None, 'auth1 获取 sessionId 失败：%s' % text_value(e))
+
+        if not session_id:
+            try:
+                online = self._session_json(openers,
+                                            '/eportal/adaptor/getOnlineUserInfo?sessionId=',
+                                            method='GET')
+                portal_info = (online.get('data') or {}).get('portalOnlineUserInfo') or {}
+                if portal_info.get('result') != 'success':
+                    return (True, '已经下线')
+            except Exception:
+                pass
+            return (None, 'auth1 未返回 sessionId')
+
+        try:
+            online = self._session_json(openers,
+                                        '/eportal/adaptor/getOnlineUserInfo?sessionId=' + quote(session_id),
+                                        method='GET')
+            portal_info = (online.get('data') or {}).get('portalOnlineUserInfo') or {}
+            if portal_info.get('result') != 'success':
+                return (True, '已经下线')
+        except Exception:
+            pass
+
+        try:
+            result = self._session_json(openers, '/eportal/network/offline',
+                                        {'sessionId': session_id})
+        except Exception as e:
+            return (None, 'auth1 下线请求失败：%s' % text_value(e))
+
+        if result.get('code') == 200:
+            return (True, '下线成功')
+        return (False, result.get('message') or 'auth1 下线失败')
+
 
     def logout(self):
         '''
         登出，操作内会自动获取特征码
         :return:元祖第一项：是否操作成功；第二项：详细信息
         '''
-        if self.alldata==None:
-            self.get_alldata()
+        auth1_state, auth1_info = self._logout_auth1()
+        if auth1_state is not None:
+            return (auth1_state, auth1_info)
 
-        res = get(self.url+'logout',headers = self.header)
-        logout_json = self._parse_json(res)
-        #self.info = logout_json
-        self.info = logout_json.get('message', '认证接口返回异常')
+        try:
+            if self.alldata==None:
+                self.get_alldata()
+
+            res = get(self.url+'logout',headers = self.header)
+            logout_json = self._parse_json(res)
+            #self.info = logout_json
+            self.info = logout_json.get('message', '认证接口返回异常')
+        except Exception as e:
+            return (False, auth1_info + '；旧认证接口下线也失败：%s' % text_value(e))
 
         if logout_json.get('result') == 'success':
             return (True,'下线成功')
@@ -763,6 +1326,90 @@ if __name__ == '__main__':
     loger = Netlogin()
     l = len(sys.argv)
     name = sys.argv[0]
+    if l >= 2 and sys.argv[1] == 'login-stdin':
+        try:
+            payload = json.load(sys.stdin)
+            user = text_value(payload.get('username', '')).strip()
+            pwd = text_value(payload.get('password', ''))
+            service_type = text_value(payload.get('service', '')).strip()
+            if service_type not in loger.services:
+                raise ValueError('运营商编号必须是 0、1、2 或 3')
+            state, info = loger.login(user=user, pwd=pwd, type=service_type)
+            print(json.dumps({
+                'ok': bool(state),
+                'message': text_value(info),
+                'service': loger.services.get(service_type, service_type),
+            }, ensure_ascii=False))
+            sys.exit(0 if state else 1)
+        except Exception as e:
+            print(json.dumps({
+                'ok': False,
+                'message': text_value(e),
+            }, ensure_ascii=False))
+            sys.exit(2)
+    if l>=2 and sys.argv[1] in ('status', 'current-status'):
+        status = loger.current_status()
+        if '--json' in sys.argv[2:]:
+            print(json.dumps(status, ensure_ascii=False, indent=2))
+        else:
+            loger.print_current_status(status)
+        sys.exit(0)
+    if l>=2 and sys.argv[1] == 'account-status':
+        args = sys.argv[2:]
+        output_json = '--json' in args
+        args = [item for item in args if item != '--json']
+        accounts_file = ''
+        account_name = ''
+        positional = []
+        error = ''
+        index = 0
+        while index < len(args):
+            item = args[index]
+            if item in ('--accounts-file', '--account-file'):
+                if index + 1 >= len(args):
+                    error = '%s 缺少路径参数' % item
+                    break
+                accounts_file = args[index + 1]
+                index += 2
+            elif item in ('--account-name', '--name'):
+                if index + 1 >= len(args):
+                    error = '%s 缺少账号配置名' % item
+                    break
+                account_name = args[index + 1]
+                index += 2
+            elif item.startswith('--'):
+                error = '未知参数：%s' % item
+                break
+            else:
+                positional.append(item)
+                index += 1
+
+        if not error and accounts_file:
+            if not account_name and positional:
+                account_name = positional.pop(0)
+            try:
+                user, pwd = load_account_credentials(accounts_file, account_name)
+            except Exception as e:
+                error = text_value(e)
+        elif not error and len(positional) >= 2:
+            user, pwd = positional[0], positional[1]
+        elif not error:
+            error = ('格式：%s account-status userid password [--json]；'
+                     '或 %s account-status --accounts-file path --account-name name [--json]'
+                     % (name, name))
+
+        if error:
+            print(error)
+            sys.exit(2)
+
+        status = loger.account_status(user, pwd)
+        if output_json:
+            print(json.dumps(status, ensure_ascii=False, indent=2))
+        else:
+            loger.print_account_status(status)
+        if not (status.get('summary') or {}).get('casLoginOk'):
+            sys.exit(1)
+        sys.exit(0)
     if l==2 and sys.argv[1]=='logout':
         state,info = loger.logout()
         if state:
@@ -779,7 +1426,11 @@ if __name__ == '__main__':
         print('登陆服务： 0.校园网 1.中国移动 2.中国联通 3.中国电信')
         print('格式：')
         print('登入：%s userid password [service_type=校园网] ' % name)
+        print('安全登入：向标准输入传入 JSON，然后执行 %s login-stdin' % name)
         print('注销：%s logout ' % name)
+        print('状态：%s current-status [--json] ' % name)
+        print('账号设备：%s account-status userid password [--json] ' % name)
+        print('账号设备配置：%s account-status --accounts-file path --account-name name [--json] ' % name)
         state, info = loger.login(user="", pwd="", type='3')
         print(state, info)
         sys.exit(0)
