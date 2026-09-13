@@ -6,6 +6,45 @@ import desktop_gui
 
 
 class RemoteFallbackTests(unittest.TestCase):
+    def test_remote_login_stops_when_query_machine_preflight_fails(self):
+        host = {'id': 'remote-1', 'target': 'example-host'}
+        preflight = {
+            'ok': False,
+            'message': '当前机器不符合查询机器要求；需要先实现访问校园局域网',
+        }
+        with mock.patch.object(
+                desktop_gui, '_run_remote_unlocked', return_value=preflight) as run:
+            result = desktop_gui.run_target(host, 'login', {'username': 'demo'})
+
+        self.assertFalse(result['ok'])
+        run.assert_called_once_with(
+            host, 'query-machine-status', None, 30)
+
+    def test_remote_query_machine_check_always_uses_bundled_script(self):
+        host = {
+            'target': 'example-host',
+            'script': '/old/netlogin.py',
+        }
+        identity = mock.Mock(returncode=0, stdout='example\n', stderr='')
+        completed = mock.Mock(
+            returncode=0,
+            stdout=json.dumps({'ok': True, 'message': 'qualified'}),
+            stderr='',
+        )
+        with mock.patch.object(desktop_gui.subprocess, 'run', return_value=identity), \
+                mock.patch.object(desktop_gui, 'detect_remote_python', return_value='python3'), \
+                mock.patch.object(desktop_gui, 'run_remote_script_file') as old_script, \
+                mock.patch.object(
+                    desktop_gui, 'run_embedded_netlogin', return_value=completed) as embedded:
+            result = desktop_gui._run_remote_unlocked(
+                host, 'query-machine-status')
+
+        self.assertTrue(result['ok'])
+        old_script.assert_not_called()
+        embedded.assert_called_once_with(
+            host, 'query-machine-status', None, 30,
+            remote_python='python3', online_user_uuids=None)
+
     def test_remote_account_query_uses_bundled_script(self):
         host = {
             'id': 'remote-1',

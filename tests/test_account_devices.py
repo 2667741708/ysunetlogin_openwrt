@@ -22,6 +22,44 @@ def current_status(user='20260001', count=2):
 
 
 class AccountDeviceStatusTests(unittest.TestCase):
+    def test_query_machine_preflight_accepts_auth1_session(self):
+        netlogin = Netlogin()
+        with patch.object(netlogin, '_auth1_session_info', return_value={
+                'sessionId': 'session-campus',
+                'source': 'portal-redirect',
+                'url': 'https://auth1.ysu.edu.cn/?sessionId=session-campus',
+                'errors': [],
+        }):
+            result = netlogin.query_machine_status()
+
+        self.assertTrue(result['ok'])
+        self.assertTrue(result['sessionIdAvailable'])
+        self.assertIn('符合查询机器要求', result['message'])
+
+    def test_query_machine_preflight_requires_campus_lan(self):
+        netlogin = Netlogin()
+        with patch.object(netlogin, '_auth1_session_info', return_value={
+                'sessionId': '', 'source': '', 'url': '', 'portalUrl': '',
+                'errors': ['auth1-root: unreachable'],
+        }):
+            result = netlogin.query_machine_status()
+
+        self.assertFalse(result['ok'])
+        self.assertIn('需要先实现访问校园局域网', result['message'])
+
+    def test_account_query_stops_when_machine_is_not_qualified(self):
+        netlogin = Netlogin()
+        not_qualified = current_status('different-user')
+        not_qualified['auth1Session'] = {}
+        with patch.object(netlogin, 'current_status', return_value=not_qualified), \
+                patch.object(netlogin, '_cas_login_only') as cas_login:
+            result = netlogin.account_status('20260001', 'secret')
+
+        self.assertFalse(result['ok'])
+        self.assertFalse(result['summary']['queryMachineQualified'])
+        self.assertIn('需要先实现访问校园局域网', result['errors'][0])
+        cas_login.assert_not_called()
+
     def test_reuses_matching_current_session_and_returns_all_devices(self):
         netlogin = Netlogin()
         with patch.object(netlogin, 'current_status', return_value=current_status()), \

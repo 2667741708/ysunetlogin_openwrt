@@ -535,6 +535,8 @@ class Netlogin():
 
         return {
             'account': target_user,
+            'queryMachineQualified': bool(
+                (status.get('queryMachine') or {}).get('ok')),
             'casLoginOk': bool((status.get('casLogin') or {}).get('ok')),
             'querySource': (status.get('casLogin') or {}).get('source') or '',
             'onlineDeviceCount': len(brief_devices),
@@ -558,10 +560,44 @@ class Netlogin():
         return bool(target and summary.get('online') and any(
             self._normalized_account(item) == target for item in candidates if item))
 
+    def _query_machine_result(self, session_info):
+        session_info = session_info or {}
+        session_id = session_info.get('sessionId') or ''
+        portal_reachable = bool(
+            session_id or session_info.get('url') or session_info.get('portalUrl'))
+        if session_id:
+            message = '符合查询机器要求：可以访问校园网认证环境并获得 auth1 会话'
+        elif portal_reachable:
+            message = ('当前机器可以访问认证入口，但未获得有效 auth1 sessionId；'
+                       '需要先实现访问校园局域网')
+        else:
+            message = ('当前机器不符合查询机器要求；需要先实现访问校园局域网，'
+                       '并确认 auth1.ysu.edu.cn 与学校 CAS 可达')
+        return {
+            'ok': bool(session_id),
+            'qualifiesAsQueryMachine': bool(session_id),
+            'campusPortalReachable': portal_reachable,
+            'sessionIdAvailable': bool(session_id),
+            'sessionSource': session_info.get('source') or '',
+            'message': message,
+            'errors': list(session_info.get('errors') or []),
+        }
+
+    def query_machine_status(self):
+        '''
+        只读检查当前机器是否具备校园网查询上下文，不登录或下线任何账号。
+        '''
+        openers = self._new_cookie_openers()
+        session_info = self._auth1_session_info(openers)
+        return self._query_machine_result(session_info)
+
     def _account_status_from_current(self, current, user):
         status = {
+            'ok': True,
             'changed': False,
             'account': user,
+            'queryMachine': self._query_machine_result(
+                current.get('auth1Session') or {}),
             'auth1Session': current.get('auth1Session') or {},
             'casLogin': {
                 'ok': True,
@@ -671,12 +707,37 @@ class Netlogin():
         只执行 CAS 登录以获得账号会话，不执行 serviceLogin、注销或踢设备。
         '''
         current = self.current_status()
+        query_machine = self._query_machine_result(
+            current.get('auth1Session') or {})
+        if not query_machine.get('ok'):
+            message = query_machine.get('message') or '需要先实现访问校园局域网'
+            status = {
+                'ok': False,
+                'changed': False,
+                'account': user,
+                'queryMachine': query_machine,
+                'auth1Session': current.get('auth1Session') or {},
+                'casLogin': {
+                    'ok': False,
+                    'message': message,
+                    'sessionId': '',
+                    'source': 'query-machine-preflight',
+                },
+                'online': {},
+                'devices': {},
+                'offlineAccount': {},
+                'errors': [message],
+            }
+            status['summary'] = self._account_status_summary(status)
+            return status
         if self._current_session_matches_account(current, user):
             return self._account_status_from_current(current, user)
 
         status = {
+            'ok': False,
             'changed': False,
             'account': user,
+            'queryMachine': query_machine,
             'auth1Session': {},
             'casLogin': {},
             'online': {},
@@ -714,6 +775,8 @@ class Netlogin():
             status['errors'].append(cas_info.get('message') or 'CAS 登录失败')
             status['summary'] = self._account_status_summary(status)
             return status
+
+        status['ok'] = True
 
         quoted_session = quote(session_id)
         probes = [
@@ -1457,6 +1520,10 @@ if __name__ == '__main__':
     loger = Netlogin()
     l = len(sys.argv)
     name = sys.argv[0]
+    if l >= 2 and sys.argv[1] == 'query-machine-status':
+        result = loger.query_machine_status()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        sys.exit(0 if result.get('ok') else 1)
     if l >= 2 and sys.argv[1] in ('account-status-stdin', 'account-offline-devices-stdin'):
         try:
             payload = json.load(sys.stdin)
