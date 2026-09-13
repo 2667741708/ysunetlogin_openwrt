@@ -51,7 +51,7 @@ class ConfigMigrationTests(unittest.TestCase):
 
             host = next(item for item in store.data["hosts"] if item["id"] == "host-1")
             local = next(item for item in store.data["hosts"] if item["id"] == desktop_gui.LOCAL_HOST_ID)
-            self.assertEqual(4, store.data["version"])
+            self.assertEqual(5, store.data["version"])
             self.assertNotIn("identity_file", host)
             self.assertNotIn("private_key", host)
             self.assertEqual("ssh", host["connection_type"])
@@ -63,6 +63,59 @@ class ConfigMigrationTests(unittest.TestCase):
             persisted = config_path.read_text(encoding="utf-8")
             self.assertNotIn("id_ed25519", persisted)
             self.assertNotIn("must-not-survive", persisted)
+
+    def test_legacy_seeded_remote_paths_are_cleared(self):
+        with tempfile.TemporaryDirectory() as directory:
+            appdata = Path(directory)
+            config_dir = appdata / desktop_gui.APP_NAME
+            config_dir.mkdir()
+            config_path = config_dir / "config.json"
+            legacy = desktop_gui.LEGACY_SEEDED_REMOTE_DEFAULTS["c201-4090"]
+            config_path.write_text(json.dumps({
+                "version": 4,
+                "accounts": [],
+                "hosts": [{
+                    "id": "legacy-4090",
+                    "name": "4090 服务器",
+                    "connection_type": "ssh",
+                    "target": "c201-4090",
+                    "expected_hostname": legacy["expected_hostname"],
+                    "script": legacy["script"],
+                }],
+            }), encoding="utf-8")
+
+            with mock.patch.dict("os.environ", {"APPDATA": str(appdata)}):
+                store = desktop_gui.ConfigStore()
+
+            host = next(item for item in store.data["hosts"] if item["id"] == "legacy-4090")
+            self.assertEqual("", host["expected_hostname"])
+            self.assertEqual("", host["script"])
+
+    def test_custom_remote_path_is_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            appdata = Path(directory)
+            config_dir = appdata / desktop_gui.APP_NAME
+            config_dir.mkdir()
+            config_path = config_dir / "config.json"
+            config_path.write_text(json.dumps({
+                "version": 4,
+                "accounts": [],
+                "hosts": [{
+                    "id": "custom-4090",
+                    "name": "自定义服务器",
+                    "connection_type": "ssh",
+                    "target": "c201-4090",
+                    "expected_hostname": "custom-host",
+                    "script": "/opt/netlogin/netlogin.py",
+                }],
+            }), encoding="utf-8")
+
+            with mock.patch.dict("os.environ", {"APPDATA": str(appdata)}):
+                store = desktop_gui.ConfigStore()
+
+            host = next(item for item in store.data["hosts"] if item["id"] == "custom-4090")
+            self.assertEqual("custom-host", host["expected_hostname"])
+            self.assertEqual("/opt/netlogin/netlogin.py", host["script"])
 
 
 if __name__ == "__main__":

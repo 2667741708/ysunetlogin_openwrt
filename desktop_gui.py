@@ -28,8 +28,8 @@ from heartbeat import (
 from netlogin import Netlogin
 
 APP_NAME = 'YSUNetloginManager'
-APP_VERSION = '2.1.0'
-CONFIG_VERSION = 4
+APP_VERSION = '2.1.1'
+CONFIG_VERSION = 5
 LOCAL_HOST_ID = 'local-windows'
 SERVICES = {'0': '校园网', '1': '中国移动', '2': '中国联通', '3': '中国电信'}
 SERVICE_IDS = {value: key for key, value in SERVICES.items()}
@@ -40,6 +40,17 @@ SSH_ALIAS_RE = re.compile(r'^[^\s*?!]+$')
 SSH_VALUE_RE = re.compile(r'^[^\r\n]+$')
 _REMOTE_LOCKS = {}
 _REMOTE_LOCKS_GUARD = threading.Lock()
+
+LEGACY_SEEDED_REMOTE_DEFAULTS = {
+    'c201-4090': {
+        'expected_hostname': 'a-MS-7E06',
+        'script': '/home/a/网络登录服务器管理/ysunetlogin_openwrt/netlogin.py',
+    },
+    'c201-5080': {
+        'expected_hostname': 'c201-MS-7E06',
+        'script': '/home/c201/网络登录服务器管理/ysunetlogin_openwrt/netlogin.py',
+    },
+}
 
 
 def default_local_host():
@@ -163,6 +174,12 @@ class ConfigStore:
             if host.get('connection_type') not in ('local', 'ssh'):
                 host['connection_type'] = connection_type
                 changed = True
+            legacy = LEGACY_SEEDED_REMOTE_DEFAULTS.get(host.get('target'))
+            if legacy:
+                for key in ('expected_hostname', 'script'):
+                    if host.get(key) == legacy[key]:
+                        host[key] = ''
+                        changed = True
             defaults = {
                 'heartbeat_enabled': False,
                 'heartbeat_interval_seconds': DEFAULT_INTERVAL_SECONDS,
@@ -387,6 +404,14 @@ def run_embedded_netlogin(host, action, account=None, timeout=30):
         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
 
 
+def remote_script_is_missing(completed):
+    """Detect only Python's missing-script failure, where an embedded retry is safe."""
+    detail = '%s\n%s' % (completed.stdout or '', completed.stderr or '')
+    lowered = detail.lower()
+    return ("can't open file" in lowered or 'cannot open file' in lowered) and (
+        'no such file or directory' in lowered or '[errno 2]' in lowered)
+
+
 def _run_remote_unlocked(host, action, account=None, timeout=30):
     try:
         identity = subprocess.run(
@@ -409,6 +434,8 @@ def _run_remote_unlocked(host, action, account=None, timeout=30):
         }
     if host.get('script'):
         completed = run_remote_script_file(host, action, account, timeout)
+        if remote_script_is_missing(completed):
+            completed = run_embedded_netlogin(host, action, account, timeout)
     else:
         completed = run_embedded_netlogin(host, action, account, timeout)
     output = (completed.stdout or completed.stderr).strip()
@@ -1488,11 +1515,9 @@ def seed_known_hosts(store):
         return
     store.data['hosts'].extend([
         {'id': str(uuid.uuid4()), 'name': '4090 服务器', 'connection_type': 'ssh', 'target': 'c201-4090',
-         'expected_hostname': 'a-MS-7E06',
-         'script': '/home/a/网络登录服务器管理/ysunetlogin_openwrt/netlogin.py', 'account_id': ''},
+         'expected_hostname': '', 'script': '', 'account_id': ''},
         {'id': str(uuid.uuid4()), 'name': '5080 服务器', 'connection_type': 'ssh', 'target': 'c201-5080',
-         'expected_hostname': 'c201-MS-7E06',
-         'script': '/home/c201/网络登录服务器管理/ysunetlogin_openwrt/netlogin.py', 'account_id': ''},
+         'expected_hostname': '', 'script': '', 'account_id': ''},
     ])
     store.save()
 
