@@ -535,6 +535,7 @@ class Netlogin():
         return {
             'account': target_user,
             'casLoginOk': bool((status.get('casLogin') or {}).get('ok')),
+            'querySource': (status.get('casLogin') or {}).get('source') or '',
             'onlineDeviceCount': len(brief_devices),
             'offlineDeviceCount': len(offline_devices),
             'devices': brief_devices,
@@ -544,6 +545,36 @@ class Netlogin():
             'note': ('auth1 的 findDevice 设备列表当前未包含每台设备的运营商；'
                      '只有当前出口设备可用 getOnlineUserInfo 补齐服务名。'),
         }
+
+    def _normalized_account(self, value):
+        value = text_value(value).strip().lower()
+        return value.split('@', 1)[0]
+
+    def _current_session_matches_account(self, current, user):
+        summary = (current or {}).get('summary') or {}
+        target = self._normalized_account(user)
+        candidates = [summary.get('userId'), summary.get('userName')]
+        return bool(target and summary.get('online') and any(
+            self._normalized_account(item) == target for item in candidates if item))
+
+    def _account_status_from_current(self, current, user):
+        status = {
+            'changed': False,
+            'account': user,
+            'auth1Session': current.get('auth1Session') or {},
+            'casLogin': {
+                'ok': True,
+                'message': '已复用本机当前认证会话',
+                'sessionId': (current.get('auth1Session') or {}).get('sessionId') or '',
+                'source': 'current-session',
+            },
+            'online': current.get('online') or {},
+            'devices': current.get('devices') or {},
+            'offlineAccount': current.get('offlineAccount') or {},
+            'errors': list(current.get('errors') or []),
+        }
+        status['summary'] = self._account_status_summary(status)
+        return status
 
     def current_status(self):
         '''
@@ -638,6 +669,10 @@ class Netlogin():
         只读查询指定账号的在线设备列表。
         只执行 CAS 登录以获得账号会话，不执行 serviceLogin、注销或踢设备。
         '''
+        current = self.current_status()
+        if self._current_session_matches_account(current, user):
+            return self._account_status_from_current(current, user)
+
         status = {
             'changed': False,
             'account': user,
@@ -649,7 +684,24 @@ class Netlogin():
             'errors': [],
         }
 
-        ok, cas_info, openers = self._cas_login_only(user, pwd)
+        try:
+            ok, cas_info, openers = self._cas_login_only(user, pwd)
+        except HTTPError as error:
+            code = getattr(error, 'code', None)
+            if code == 401:
+                message = ('CAS 登录请求被拒绝（HTTP 401）。请检查保存的密码；'
+                           '若本机正在使用该账号，请先确认当前登录账号与所选配置一致。')
+            else:
+                message = 'CAS 登录请求失败（HTTP %s）' % (code or '未知')
+            status['casLogin'] = {
+                'ok': False,
+                'message': message,
+                'sessionId': '',
+                'source': 'cas-http-error',
+            }
+            status['errors'].append(message)
+            status['summary'] = self._account_status_summary(status)
+            return status
         status['casLogin'] = cas_info
         session_id = cas_info.get('sessionId') or ''
         status['auth1Session'] = {

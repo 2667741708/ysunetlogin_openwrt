@@ -1,5 +1,5 @@
 param(
-  [string]$Version = '2.0.0'
+  [string]$Version = '2.1.0'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -50,6 +50,12 @@ New-Item -ItemType Directory -Path $stage | Out-Null
 Copy-Item -LiteralPath $exe -Destination $stage
 Copy-Item -LiteralPath (Join-Path $root 'WINDOWS_LOCAL_SETUP.md') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination $stage
+$screenshots = Join-Path $root ("docs\screenshots\v$Version")
+if (Test-Path -LiteralPath $screenshots) {
+  $screenshotTarget = Join-Path $stage ("docs\screenshots\v$Version")
+  New-Item -ItemType Directory -Path $screenshotTarget -Force | Out-Null
+  Copy-Item -Path (Join-Path $screenshots '*') -Destination $screenshotTarget
+}
 
 $hash = Get-FileHash -LiteralPath (Join-Path $stage 'YSU-Netlogin-Healing-Manager.exe') -Algorithm SHA256
 $hashLine = "$($hash.Hash.ToLower())  YSU-Netlogin-Healing-Manager.exe"

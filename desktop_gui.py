@@ -23,11 +23,14 @@ from heartbeat import (
     MAX_FAILURE_THRESHOLD,
     MAX_INTERVAL_SECONDS,
     MIN_INTERVAL_SECONDS,
+    assess_status,
 )
 from netlogin import Netlogin
 
 APP_NAME = 'YSUNetloginManager'
-APP_VERSION = '2.0.0'
+APP_VERSION = '2.1.0'
+CONFIG_VERSION = 4
+LOCAL_HOST_ID = 'local-windows'
 SERVICES = {'0': '校园网', '1': '中国移动', '2': '中国联通', '3': '中国电信'}
 SERVICE_IDS = {value: key for key, value in SERVICES.items()}
 TARGET_RE = re.compile(r'^[A-Za-z0-9_.@:\-]+$')
@@ -37,6 +40,21 @@ SSH_ALIAS_RE = re.compile(r'^[^\s*?!]+$')
 SSH_VALUE_RE = re.compile(r'^[^\r\n]+$')
 _REMOTE_LOCKS = {}
 _REMOTE_LOCKS_GUARD = threading.Lock()
+
+
+def default_local_host():
+    return {
+        'id': LOCAL_HOST_ID,
+        'name': '本机 Windows',
+        'connection_type': 'local',
+        'target': 'local',
+        'expected_hostname': '',
+        'script': '',
+        'account_id': '',
+        'heartbeat_enabled': False,
+        'heartbeat_interval_seconds': DEFAULT_INTERVAL_SECONDS,
+        'heartbeat_failure_threshold': DEFAULT_FAILURE_THRESHOLD,
+    }
 
 REMOTE_BOOTSTRAP = r"""
 import base64, json, os, subprocess, sys, tempfile
@@ -118,7 +136,7 @@ class ConfigStore:
         appdata = os.environ.get('APPDATA') or str(Path.home())
         self.directory = Path(appdata) / APP_NAME
         self.path = self.directory / 'config.json'
-        self.data = {'version': 3, 'accounts': [], 'hosts': []}
+        self.data = {'version': CONFIG_VERSION, 'accounts': [], 'hosts': []}
         self.load()
 
     def load(self):
@@ -131,7 +149,7 @@ class ConfigStore:
 
     def _migrate(self):
         """Migrate profiles without retaining SSH secrets or losing heartbeat data."""
-        changed = self.data.get('version') != 3
+        changed = self.data.get('version') != CONFIG_VERSION
         forbidden = {
             'identity_file', 'identityfile', 'private_key', 'private_key_path',
             'ssh_private_key', 'ssh_key_data', 'key_data',
@@ -141,6 +159,10 @@ class ConfigStore:
                 if key.lower() in forbidden:
                     host.pop(key, None)
                     changed = True
+            connection_type = 'local' if host.get('id') == LOCAL_HOST_ID else 'ssh'
+            if host.get('connection_type') not in ('local', 'ssh'):
+                host['connection_type'] = connection_type
+                changed = True
             defaults = {
                 'heartbeat_enabled': False,
                 'heartbeat_interval_seconds': DEFAULT_INTERVAL_SECONDS,
@@ -150,7 +172,10 @@ class ConfigStore:
                 if key not in host:
                     host[key] = value
                     changed = True
-        self.data['version'] = 3
+        if not any(host.get('id') == LOCAL_HOST_ID for host in self.data.get('hosts') or []):
+            self.data.setdefault('hosts', []).insert(0, default_local_host())
+            changed = True
+        self.data['version'] = CONFIG_VERSION
         if changed and self.path.exists():
             self.save()
 
@@ -395,13 +420,72 @@ def _run_remote_unlocked(host, action, account=None, timeout=30):
     return result
 
 
-def run_remote(host, action, account=None, timeout=30):
-    """Serialize manual and heartbeat operations for the same SSH target."""
+def _run_local_unlocked(host, action, account=None, timeout=30):
+    """Run the same netlogin core directly against the Windows host network."""
+    if action == 'ssh-test':
+        return {
+            'ok': True,
+            'message': '本机网络功能可用',
+            'hostname': socket.gethostname(),
+            'target': '本机 Windows',
+        }
+    netlogin = Netlogin()
+    if action == 'status':
+        result = netlogin.current_status()
+        result['ok'] = True
+        result['targetType'] = 'local'
+        return result
+    if action == 'logout':
+        state, message = netlogin.logout()
+        return {'ok': bool(state), 'message': message, 'targetType': 'local'}
+    if not account:
+        return {'ok': False, 'message': '未选择用于本机联网的账号'}
+    current = netlogin.current_status()
+    assessment = assess_status(current, account)
+    summary = current.get('summary') or {}
+    if assessment.get('healthy'):
+        if summary.get('online'):
+            message = '本机已使用指定账号和运营商在线'
+        else:
+            message = assessment.get('reason') or '本机外网已连接'
+        return {'ok': True, 'message': message, 'targetType': 'local'}
+    if assessment.get('needs_logout'):
+        logout_state, logout_message = netlogin.logout()
+        if not logout_state:
+            return {
+                'ok': False,
+                'message': '切换到指定账号前无法下线旧会话：%s' % logout_message,
+                'targetType': 'local',
+            }
+        netlogin = Netlogin()
+    password = unprotect_secret(account.get('password', ''))
+    state, message = netlogin.login(
+        user=account.get('username', ''),
+        pwd=password,
+        type=str(account.get('service', '')),
+    )
+    return {
+        'ok': bool(state),
+        'message': message,
+        'targetType': 'local',
+        'service': str(account.get('service', '')),
+    }
+
+
+def run_target(host, action, account=None, timeout=30):
+    """Serialize manual and heartbeat operations for one local or SSH target."""
     lock_key = host.get('id') or host.get('target') or 'unknown'
     with _REMOTE_LOCKS_GUARD:
         lock = _REMOTE_LOCKS.setdefault(lock_key, threading.Lock())
     with lock:
+        if host.get('connection_type') == 'local' or host.get('id') == LOCAL_HOST_ID:
+            return _run_local_unlocked(host, action, account, timeout)
         return _run_remote_unlocked(host, action, account, timeout)
+
+
+def run_remote(host, action, account=None, timeout=30):
+    """Backward-compatible SSH/local operation entry point."""
+    return run_target(host, action, account, timeout)
 
 
 class DesktopApp(tk.Tk):
@@ -433,7 +517,7 @@ class DesktopApp(tk.Tk):
         self.build_ui()
         self.refresh_all()
         self.heartbeat_engine = HeartbeatEngine(
-            self.heartbeat_profiles, run_remote, self.on_heartbeat_event)
+            self.heartbeat_profiles, run_target, self.on_heartbeat_event)
         self.heartbeat_engine.start()
         self.protocol('WM_DELETE_WINDOW', self.close_app)
 
@@ -441,10 +525,10 @@ class DesktopApp(tk.Tk):
         header = ttk.Frame(self, padding=(28, 22, 28, 14))
         header.pack(fill='x')
         ttk.Label(header, text='校园网登录管理器', style='Title.TLabel').pack(anchor='w')
-        ttk.Label(header, text='选择服务器与校园网账号，一次操作完成远端认证。', style='Muted.TLabel').pack(anchor='w', pady=(4, 10))
+        ttk.Label(header, text='选择本机或服务器与校园网账号，一次操作完成认证。', style='Muted.TLabel').pack(anchor='w', pady=(4, 10))
         ttk.Label(
             header,
-            text='✓ 安全模式：不读取、不保存、不打包 SSH 私钥；认证由 Windows OpenSSH / ssh-agent 管理',
+            text='✓ 本机可直接联网；远端模式不读取、不保存、不打包 SSH 私钥',
             style='Security.TLabel',
             padding=(10, 6),
         ).pack(anchor='w')
@@ -457,7 +541,7 @@ class DesktopApp(tk.Tk):
         self.tabs.add(self.operation_tab, text=' 一键连接 ')
         self.tabs.add(self.heartbeat_tab, text=' 网络自愈心跳 ')
         self.tabs.add(self.accounts_tab, text=' 校园网账号 ')
-        self.tabs.add(self.hosts_tab, text=' SSH 主机 ')
+        self.tabs.add(self.hosts_tab, text=' 连接目标 ')
         self.build_operation_tab()
         self.build_heartbeat_tab()
         self.build_accounts_tab()
@@ -466,10 +550,10 @@ class DesktopApp(tk.Tk):
     def build_operation_tab(self):
         frame = self.operation_tab
         ttk.Label(
-            frame, text='让哪台服务器上线？', background='#ffffff',
+            frame, text='让哪个目标上线？', background='#ffffff',
             foreground='#13251e', font=('Microsoft YaHei UI', 16, 'bold')
         ).grid(row=0, column=0, sticky='w', pady=(0, 18))
-        ttk.Label(frame, text='目标 SSH 主机', background='#ffffff').grid(row=1, column=0, sticky='w')
+        ttk.Label(frame, text='目标设备', background='#ffffff').grid(row=1, column=0, sticky='w')
         self.op_host = ttk.Combobox(frame, state='readonly', width=48)
         self.op_host.grid(row=2, column=0, sticky='ew', pady=(6, 18))
         self.op_host.bind('<<ComboboxSelected>>', self.apply_host_default)
@@ -510,7 +594,7 @@ class DesktopApp(tk.Tk):
         ).grid(row=0, column=0, columnspan=3, sticky='w')
         ttk.Label(
             frame,
-            text='每台服务器使用“SSH 主机”页设置的默认账号。连续异常达到阈值后才会重连，恢复后会再次验证。',
+            text='每个目标使用“连接目标”页设置的默认账号。本机直接检测，远端通过 SSH；连续异常达到阈值后才会重连。',
             foreground='#66736d', background='#ffffff', wraplength=820,
         ).grid(row=1, column=0, columnspan=3, sticky='w', pady=(5, 18))
 
@@ -605,7 +689,10 @@ class DesktopApp(tk.Tk):
         self.account_kick_selected_button.pack(side='left', padx=8)
         self.account_kick_all_button = ttk.Button(device_buttons, text='踢全部设备', command=self.kick_all_account_devices)
         self.account_kick_all_button.pack(side='left')
-        self.account_device_hint = ttk.Label(right, text='先查询该账号在线设备，再按需下线。', foreground='#66736d', background='#fffdf7')
+        self.account_device_hint = ttk.Label(
+            right, text='先查询该账号在线设备，再按需下线。',
+            foreground='#66736d', background='#fffdf7', wraplength=920,
+            justify='left')
         self.account_device_hint.grid(row=11, column=0, sticky='w')
         device_list_frame = ttk.Frame(right, style='Panel.TFrame')
         device_list_frame.grid(row=12, column=0, sticky='nsew', pady=(8, 0))
@@ -636,7 +723,7 @@ class DesktopApp(tk.Tk):
         host_list_frame.columnconfigure(0, weight=1)
         host_list_frame.rowconfigure(0, weight=1)
         self.host_list.bind('<<ListboxSelect>>', self.load_host_form)
-        ttk.Button(left, text='新建连接档案', command=self.new_host).pack(fill='x', pady=(10, 0))
+        ttk.Button(left, text='新建远端连接', command=self.new_host).pack(fill='x', pady=(10, 0))
         ttk.Button(left, text='导入 SSH Config 别名', command=self.reload_ssh_config).pack(fill='x', pady=(8, 0))
         right = ttk.Frame(self.hosts_tab, style='Panel.TFrame')
         right.pack(side='left', fill='both', expand=True)
@@ -644,7 +731,7 @@ class DesktopApp(tk.Tk):
             'id', 'ssh_key', 'name', 'aliases', 'hostname', 'script', 'account')}
         ttk.Label(
             right,
-            text='安全连接档案  ·  只保存 SSH Host 别名，不保存密钥',
+            text='本机直接联网  ·  远端只保存 SSH Host 别名，不保存密钥',
             foreground='#175c3b', background='#e4f3ea',
             font=('Microsoft YaHei UI', 12, 'bold'), padding=(10, 7), wraplength=650,
         ).grid(row=0, column=0, columnspan=2, sticky='ew', pady=(0, 8))
@@ -652,20 +739,21 @@ class DesktopApp(tk.Tk):
             right, text='读取来源：%s' % self.ssh_config.path,
             foreground='#66736d', background='#ffffff', wraplength=650
         ).grid(row=1, column=0, columnspan=2, sticky='w', pady=(0, 4))
-        self.form_entry_at(right, 2, 0, '显示名称', self.host_vars['name'])
-        self.form_entry_at(right, 2, 1, 'SSH Host 别名', self.host_vars['aliases'])
-        self.form_entry_at(right, 4, 0, '预期主机名（远端 hostname，可选）', self.host_vars['hostname'], columnspan=2)
-        self.form_entry_at(right, 6, 0, '远端 netlogin.py 绝对路径（可选；留空使用内置脚本）', self.host_vars['script'], columnspan=2)
-        ttk.Label(right, text='该主机默认账号', background='#ffffff').grid(row=8, column=0, sticky='w', pady=(8, 4))
+        self.host_name_entry = self.form_entry_at(right, 2, 0, '显示名称', self.host_vars['name'])
+        self.host_alias_entry = self.form_entry_at(right, 2, 1, 'SSH Host 别名（本机目标无需填写）', self.host_vars['aliases'])
+        self.host_hostname_entry = self.form_entry_at(right, 4, 0, '预期主机名（远端 hostname，可选）', self.host_vars['hostname'], columnspan=2)
+        self.host_script_entry = self.form_entry_at(right, 6, 0, '远端 netlogin.py 绝对路径（可选；留空使用内置脚本）', self.host_vars['script'], columnspan=2)
+        ttk.Label(right, text='该目标默认账号', background='#ffffff').grid(row=8, column=0, sticky='w', pady=(8, 4))
         self.host_account = ttk.Combobox(right, state='readonly', textvariable=self.host_vars['account'])
         self.host_account.grid(row=9, column=0, columnspan=2, sticky='ew', padx=(0, 14))
         buttons = ttk.Frame(right, style='Panel.TFrame')
         buttons.grid(row=10, column=0, columnspan=2, sticky='w', pady=(12, 10))
         ttk.Button(buttons, text='保存连接档案', style='Primary.TButton', command=self.save_host).pack(side='left')
-        self.host_test_button = ttk.Button(buttons, text='测试 SSH', command=self.test_host_form)
+        self.host_test_button = ttk.Button(buttons, text='测试连接', command=self.test_host_form)
         self.host_test_button.pack(side='left', padx=8)
-        ttk.Button(buttons, text='删除连接档案', command=self.delete_host).pack(side='left')
-        ttk.Label(right, text='SSH 测试结果', background='#ffffff', font=('Microsoft YaHei UI', 10, 'bold')).grid(
+        self.host_delete_button = ttk.Button(buttons, text='删除连接档案', command=self.delete_host)
+        self.host_delete_button.pack(side='left')
+        ttk.Label(right, text='连接测试结果', background='#ffffff', font=('Microsoft YaHei UI', 10, 'bold')).grid(
             row=11, column=0, columnspan=2, sticky='w', pady=(2, 5))
         host_test_frame = ttk.Frame(right, style='Panel.TFrame')
         host_test_frame.grid(row=12, column=0, columnspan=2, sticky='nsew', padx=(0, 14))
@@ -751,7 +839,7 @@ class DesktopApp(tk.Tk):
             text = '默认账号：%s（%s）' % (
                 account.get('name'), SERVICES.get(account.get('service'), account.get('service')))
         else:
-            text = '默认账号：未设置。请先到“SSH 主机”页为该主机选择默认账号。'
+            text = '默认账号：未设置。请先到“连接目标”页为该目标选择默认账号。'
         self.heartbeat_account_hint.configure(text=text)
 
     def save_heartbeat_settings(self, notify=True):
@@ -780,7 +868,7 @@ class DesktopApp(tk.Tk):
         account = self.store.account(host.get('account_id', ''))
         if self.heartbeat_enabled.get() and not account:
             if notify:
-                messagebox.showerror('缺少账号', '启用心跳前，请在“SSH 主机”页为该主机设置默认账号。')
+                messagebox.showerror('缺少账号', '启用心跳前，请在“连接目标”页为该目标设置默认账号。')
             return False
         host['heartbeat_enabled'] = bool(self.heartbeat_enabled.get())
         host['heartbeat_interval_seconds'] = interval
@@ -853,9 +941,10 @@ class DesktopApp(tk.Tk):
             if not aliases:
                 continue
             existing = next((host for host in self.store.data['hosts']
-                             if host.get('ssh_config_key') == block['key']
-                             or host.get('target') in aliases
-                             or any(alias in host.get('ssh_aliases', []) for alias in aliases)), None)
+                             if host.get('connection_type') != 'local' and (
+                                 host.get('ssh_config_key') == block['key']
+                                 or host.get('target') in aliases
+                                 or any(alias in host.get('ssh_aliases', []) for alias in aliases))), None)
             options = block['options']
             updates = {
                 'ssh_config_key': block['key'],
@@ -874,6 +963,7 @@ class DesktopApp(tk.Tk):
                 self.store.data['hosts'].append({
                     'id': str(uuid.uuid4()),
                     'name': aliases[0],
+                    'connection_type': 'ssh',
                     'target': aliases[0],
                     'expected_hostname': '',
                     'script': '',
@@ -952,9 +1042,11 @@ class DesktopApp(tk.Tk):
 
     def account_device_display(self, item):
         parts = [
+            '当前设备' if item.get('currentDevice') else '',
             item.get('ip') or '无 IP',
             item.get('deviceName') or '未命名设备',
             item.get('deviceType') or '未知类型',
+            item.get('service') or '',
             item.get('onlineDuration') or '',
             item.get('accessTime') or '',
         ]
@@ -994,9 +1086,16 @@ class DesktopApp(tk.Tk):
                     summary = result.get('summary') or {}
                     devices = summary.get('devices') or []
                     text = '在线设备数：%s' % summary.get('onlineDeviceCount', 0)
+                    if summary.get('querySource') == 'current-session':
+                        text += '；已复用本机当前认证会话'
                     errors = result.get('errors') or []
                     if errors:
                         text += '；警告：%s' % '；'.join(errors)
+                    elif not devices:
+                        text += '；学校接口未返回其他在线设备'
+                    elif (len(devices) == 1 and
+                          summary.get('querySource') == 'current-session'):
+                        text += '；学校接口本次只返回 1 台设备，未返回其他会话'
                     self.after(0, lambda: self.show_account_devices(devices, text))
                 else:
                     result = netlogin.account_offline_devices(account['username'], password, uuids)
@@ -1009,7 +1108,9 @@ class DesktopApp(tk.Tk):
                     devices = (refreshed.get('summary') or {}).get('devices') or []
                     self.after(0, lambda: self.show_account_devices(devices, text))
             except Exception as exc:
-                self.after(0, lambda: self.account_device_hint.configure(text='操作失败：%s' % exc))
+                error_text = str(exc).strip() or type(exc).__name__
+                self.after(0, lambda value=error_text: self.account_device_hint.configure(
+                    text='操作失败：%s' % value))
             finally:
                 self.after(0, lambda: self.set_account_device_busy(False))
         threading.Thread(target=worker, daemon=True).start()
@@ -1051,6 +1152,16 @@ class DesktopApp(tk.Tk):
         self.host_vars['id'].set(str(uuid.uuid4()))
         self.host_vars['account'].set('（不设置）')
         self.host_list.selection_clear(0, 'end')
+        self.set_host_form_local(False)
+
+    def set_host_form_local(self, is_local):
+        state = 'disabled' if is_local else 'normal'
+        for entry in (
+                self.host_name_entry, self.host_alias_entry,
+                self.host_hostname_entry, self.host_script_entry):
+            entry.configure(state=state)
+        self.host_delete_button.configure(state='disabled' if is_local else 'normal')
+        self.host_test_button.configure(text='检查本机功能' if is_local else '测试 SSH')
 
     def load_host_form(self, event=None):
         selected = self.host_list.curselection()
@@ -1065,6 +1176,7 @@ class DesktopApp(tk.Tk):
         self.host_vars['script'].set(item.get('script', ''))
         account = self.store.account(item.get('account_id', ''))
         self.host_vars['account'].set(self.account_display(account) if account else '（不设置）')
+        self.set_host_form_local(item.get('connection_type') == 'local')
 
     def account_id_from_display(self, display):
         for item in self.accounts:
@@ -1072,9 +1184,16 @@ class DesktopApp(tk.Tk):
         return ''
 
     def validated_host_form(self):
+        host_id = self.host_vars['id'].get()
+        existing = self.store.host(host_id)
+        if existing and existing.get('connection_type') == 'local':
+            item = dict(existing)
+            item['account_id'] = self.account_id_from_display(self.host_vars['account'].get())
+            return item
         target = self.host_vars['aliases'].get().strip()
         item = {
-            'id': self.host_vars['id'].get() or str(uuid.uuid4()),
+            'id': host_id or str(uuid.uuid4()),
+            'connection_type': 'ssh',
             'ssh_config_key': self.host_vars['ssh_key'].get(),
             'name': self.host_vars['name'].get().strip(),
             'ssh_aliases': [target] if target else [],
@@ -1098,13 +1217,17 @@ class DesktopApp(tk.Tk):
         if existing: existing.update(item)
         else: self.store.data['hosts'].append(item)
         self.store.save(); self.sync_ssh_hosts(); self.refresh_all()
-        messagebox.showinfo(
-            '已保存',
-            '连接档案和默认账号映射已保存。\nSSH config 与私钥均未被修改。')
+        if item.get('connection_type') == 'local':
+            message = '本机默认账号映射已保存。'
+        else:
+            message = '连接档案和默认账号映射已保存。\nSSH config 与私钥均未被修改。'
+        messagebox.showinfo('已保存', message)
 
     def delete_host(self):
         host_id = self.host_vars['id'].get()
         host = self.store.host(host_id)
+        if host and host.get('connection_type') == 'local':
+            return messagebox.showerror('不能删除', '“本机 Windows”是内置目标，不能删除。')
         if not host_id or not host or not messagebox.askyesno(
                 '确认删除', '只删除管理器中的连接档案？\n\nSSH config 不会被修改。'):
             return
@@ -1121,11 +1244,19 @@ class DesktopApp(tk.Tk):
     def apply_host_default(self, event=None):
         host = self.host_from_operation()
         account = self.store.account(host.get('account_id', '')) if host else None
+        is_local = bool(host and host.get('connection_type') == 'local')
+        self.connect_button.configure(
+            text='使用此账号连接本机' if is_local else '一键连接校园网')
+        self.status_button.configure(
+            text='检查本机网络状态' if is_local else '查询当前状态')
+        self.logout_button.configure(
+            text='下线本机' if is_local else '下线当前服务器')
+        self.vnc_button.configure(state='disabled' if is_local else 'normal')
         if account:
             self.op_account.set(self.account_display(account))
-            self.mapping_hint.configure(text='已自动选择该主机的默认账号。')
+            self.mapping_hint.configure(text='已自动选择该目标的默认账号。')
         else:
-            self.mapping_hint.configure(text='该主机尚未设置默认账号，可在“SSH 主机”页配置。')
+            self.mapping_hint.configure(text='该目标尚未设置默认账号，可在“连接目标”页配置。')
 
     def set_output(self, text):
         self.output.configure(state='normal'); self.output.delete('1.0', 'end')
@@ -1144,11 +1275,17 @@ class DesktopApp(tk.Tk):
         self.status_button.configure(state=state)
         self.logout_button.configure(state=state)
         self.host_test_button.configure(state=state)
-        self.vnc_button.configure(state='disabled' if busy or self.vnc_connecting else 'normal')
+        host = self.host_from_operation()
+        is_local = bool(host and host.get('connection_type') == 'local')
+        self.vnc_button.configure(
+            state='disabled' if busy or self.vnc_connecting or is_local else 'normal')
 
     def set_vnc_connecting(self, busy):
         self.vnc_connecting = busy
-        self.vnc_button.configure(state='disabled' if busy or self.busy else 'normal')
+        host = self.host_from_operation()
+        is_local = bool(host and host.get('connection_type') == 'local')
+        self.vnc_button.configure(
+            state='disabled' if busy or self.busy or is_local else 'normal')
 
     def vnc_targets(self, host):
         primary = host.get('target', '')
@@ -1169,6 +1306,8 @@ class DesktopApp(tk.Tk):
         host = self.host_from_operation()
         if not host:
             return messagebox.showerror('缺少配置', '请先选择要访问的 SSH 主机。')
+        if host.get('connection_type') == 'local':
+            return messagebox.showinfo('本机无需 VNC', '“本机 Windows”目标直接在当前电脑操作，不需要 VNC。')
         session_key = host.get('id') or host.get('target')
         existing = self.vnc_sessions.get(session_key)
         if existing and existing['viewer'].poll() is None:
@@ -1257,36 +1396,47 @@ class DesktopApp(tk.Tk):
 
     def run_async(self, action, host, account=None):
         if self.busy: return
-        self.set_busy(True); self.set_output('正在通过 SSH 连接 %s，请稍候……' % host['name'])
+        is_local = host.get('connection_type') == 'local'
+        progress = ('正在检查本机网络，请稍候……' if is_local else
+                    '正在通过 SSH 连接 %s，请稍候……' % host['name'])
+        self.set_busy(True); self.set_output(progress)
         if action == 'ssh-test':
-            self.set_host_test_output('正在测试 SSH 连接：%s\n请稍候……' % host['target'])
+            test_progress = ('正在检查本机网络功能，请稍候……' if is_local else
+                             '正在测试 SSH 连接：%s\n请稍候……' % host['target'])
+            self.set_host_test_output(test_progress)
         def worker():
             succeeded = False
             try:
-                result = run_remote(host, action, account)
+                result = run_target(host, action, account)
                 succeeded = bool(result.get('ok'))
                 if action == 'status':
                     summary = result.get('summary') or {}
                     text = '\n'.join([
                         '状态：%s' % ('在线' if summary.get('online') else '离线'),
-                        '服务器：%s' % host['name'],
+                        '目标：%s' % host['name'],
                         '账号：%s' % (summary.get('userId') or '—'),
                         '运营商：%s' % (summary.get('service') or '—'),
                         'IP：%s' % (summary.get('userIp') or '—'),
                         '说明：%s' % (summary.get('message') or '—')])
                 elif action == 'ssh-test':
-                    text = '\n'.join([
-                        'SSH 连接成功',
-                        '服务器：%s' % host['name'],
-                        'SSH 目标：%s' % result.get('target', host['target']),
-                        '远端 hostname：%s' % (result.get('hostname') or '—')])
+                    if is_local:
+                        text = '\n'.join([
+                            '本机网络功能检查通过',
+                            '目标：本机 Windows',
+                            '计算机名：%s' % (result.get('hostname') or '—')])
+                    else:
+                        text = '\n'.join([
+                            'SSH 连接成功',
+                            '服务器：%s' % host['name'],
+                            'SSH 目标：%s' % result.get('target', host['target']),
+                            '远端 hostname：%s' % (result.get('hostname') or '—')])
                 elif action == 'logout':
                     text = '\n'.join([
                         result.get('message', '下线操作完成'),
-                        '服务器：%s' % host['name'],
-                        '说明：这是让该服务器当前校园网会话下线，不会删除本地保存的账号配置。'])
+                        '目标：%s' % host['name'],
+                        '说明：只让该目标当前校园网会话下线，不会删除保存的账号配置。'])
                 else:
-                    text = '%s\n服务器：%s\n账号配置：%s\n默认运营商：%s' % (
+                    text = '%s\n目标：%s\n账号配置：%s\n指定运营商：%s' % (
                         result.get('message', '操作完成'), host['name'], account['name'],
                         SERVICES.get(account['service'], account['service']))
                 if not result.get('ok'): text = '操作失败\n' + text
@@ -1297,9 +1447,9 @@ class DesktopApp(tk.Tk):
                 if action == 'ssh-test':
                     self.set_host_test_output(text)
                     if succeeded:
-                        messagebox.showinfo('SSH 测试成功', text)
+                        messagebox.showinfo('连接测试成功', text)
                     else:
-                        messagebox.showerror('SSH 测试失败', text)
+                        messagebox.showerror('连接测试失败', text)
                 self.set_busy(False)
             self.after(0, finish)
         threading.Thread(target=worker, daemon=True).start()
@@ -1307,18 +1457,18 @@ class DesktopApp(tk.Tk):
     def connect_selected(self):
         host, account = self.host_from_operation(), self.account_from_operation()
         if not host or not account:
-            return messagebox.showerror('缺少配置', '请选择 SSH 主机和校园网账号。')
+            return messagebox.showerror('缺少配置', '请选择目标设备和校园网账号。')
         self.run_async('login', host, account)
 
     def status_selected(self):
         host = self.host_from_operation()
-        if not host: return messagebox.showerror('缺少配置', '请选择 SSH 主机。')
+        if not host: return messagebox.showerror('缺少配置', '请选择目标设备。')
         self.run_async('status', host)
 
     def logout_selected(self):
         host = self.host_from_operation()
         if not host:
-            return messagebox.showerror('缺少配置', '请选择 SSH 主机。')
+            return messagebox.showerror('缺少配置', '请选择目标设备。')
         heartbeat_note = ''
         if host.get('heartbeat_enabled'):
             heartbeat_note = '\n\n这台主机已启用自愈心跳，稍后可能会按默认账号自动重新连接。'
@@ -1334,16 +1484,16 @@ class DesktopApp(tk.Tk):
 
 
 def seed_known_hosts(store):
-    if store.data['hosts'] or store.data['accounts']:
+    if any(host.get('connection_type') == 'ssh' for host in store.data.get('hosts') or []):
         return
-    store.data['hosts'] = [
-        {'id': str(uuid.uuid4()), 'name': '4090 服务器', 'target': 'c201-4090',
+    store.data['hosts'].extend([
+        {'id': str(uuid.uuid4()), 'name': '4090 服务器', 'connection_type': 'ssh', 'target': 'c201-4090',
          'expected_hostname': 'a-MS-7E06',
          'script': '/home/a/网络登录服务器管理/ysunetlogin_openwrt/netlogin.py', 'account_id': ''},
-        {'id': str(uuid.uuid4()), 'name': '5080 服务器', 'target': 'c201-5080',
+        {'id': str(uuid.uuid4()), 'name': '5080 服务器', 'connection_type': 'ssh', 'target': 'c201-5080',
          'expected_hostname': 'c201-MS-7E06',
          'script': '/home/c201/网络登录服务器管理/ysunetlogin_openwrt/netlogin.py', 'account_id': ''},
-    ]
+    ])
     store.save()
 
 
@@ -1362,6 +1512,7 @@ def main(argv=None):
             'app': APP_NAME,
             'version': APP_VERSION,
             'heartbeat': True,
+            'localTarget': default_local_host().get('connection_type') == 'local',
             'bundledViewer': viewer.is_file(),
             'aesBackend': aes_ok,
         }, ensure_ascii=False)

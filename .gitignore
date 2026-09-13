@@ -10,5 +10,7 @@ build-fixed/
 dist/
 build-secure/
 dist-secure/
+build-demo/
+dist-demo/
 release/
 *.spec

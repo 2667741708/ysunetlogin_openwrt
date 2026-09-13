@@ -49,13 +49,17 @@ class ConfigMigrationTests(unittest.TestCase):
             with mock.patch.dict("os.environ", {"APPDATA": str(appdata)}):
                 store = desktop_gui.ConfigStore()
 
-            host = store.data["hosts"][0]
-            self.assertEqual(3, store.data["version"])
+            host = next(item for item in store.data["hosts"] if item["id"] == "host-1")
+            local = next(item for item in store.data["hosts"] if item["id"] == desktop_gui.LOCAL_HOST_ID)
+            self.assertEqual(4, store.data["version"])
             self.assertNotIn("identity_file", host)
             self.assertNotIn("private_key", host)
+            self.assertEqual("ssh", host["connection_type"])
             self.assertFalse(host["heartbeat_enabled"])
             self.assertEqual(60, host["heartbeat_interval_seconds"])
             self.assertEqual(2, host["heartbeat_failure_threshold"])
+            self.assertEqual("local", local["connection_type"])
+            self.assertEqual("本机 Windows", local["name"])
             persisted = config_path.read_text(encoding="utf-8")
             self.assertNotIn("id_ed25519", persisted)
             self.assertNotIn("must-not-survive", persisted)
