@@ -1,10 +1,10 @@
 # YSU Netlogin 自愈版：Windows 本机使用与配置
 
-适用版本：`2.1.0`；适用系统：Windows 10/11 x64。
+适用版本：`2.1.1`；适用系统：Windows 10/11 x64。
 
 ## 1. 下载与启动
 
-1. 在 GitHub 仓库的 Releases 页面下载 `ysu-netlogin-healing-2.1.0-windows-x64.zip`。
+1. 在 GitHub 仓库的 Releases 页面下载 `ysu-netlogin-healing-2.1.1-windows-x64.zip`。
 2. 将压缩包完整解压到一个长期不移动的目录，例如 `D:\Tools\YSU-Netlogin`。
 3. 双击 `YSU-Netlogin-Healing-Manager.exe`。
 4. Windows SmartScreen 首次提示时，先核对发布页 SHA256，再选择“更多信息 → 仍要运行”。本程序目前没有商业代码签名证书。
