@@ -2,6 +2,7 @@
 # coding:utf-8
 import re
 import json
+import os
 import sys
 import base64
 import binascii
@@ -771,12 +772,17 @@ class Netlogin():
             result['summary'] = self._account_offline_summary(result)
             return result
 
-        ok, cas_info, openers = self._cas_login_only(user, pwd)
-        if not ok:
-            result['errors'].append(cas_info.get('message') or 'CAS 登录失败')
-            result['summary'] = self._account_offline_summary(result)
-            return result
-        session_id = cas_info.get('sessionId') or ''
+        summary = status.get('summary') or {}
+        if summary.get('querySource') == 'current-session':
+            openers = self._new_cookie_openers()
+            session_id = (status.get('auth1Session') or {}).get('sessionId') or ''
+        else:
+            ok, cas_info, openers = self._cas_login_only(user, pwd)
+            if not ok:
+                result['errors'].append(cas_info.get('message') or 'CAS 登录失败')
+                result['summary'] = self._account_offline_summary(result)
+                return result
+            session_id = cas_info.get('sessionId') or ''
         if not session_id:
             result['errors'].append('未获得 auth1 sessionId')
             result['summary'] = self._account_offline_summary(result)
@@ -1041,6 +1047,14 @@ class Netlogin():
             encoded = base64.b64encode(encrypted)
             return encoded.decode('ascii') if VERSION == 3 else encoded
 
+        if os.name == 'nt':
+            try:
+                encrypted = self._aes_encrypt_windows_cng(key, data)
+                encoded = base64.b64encode(encrypted)
+                return encoded.decode('ascii') if VERSION == 3 else encoded
+            except Exception:
+                pass
+
         proc = subprocess.Popen(
             ['openssl', 'enc', '-aes-128-ecb', '-base64',
              '-K', binascii.hexlify(key).decode('ascii'),
@@ -1054,6 +1068,71 @@ class Netlogin():
         if VERSION == 3:
             return stdout.decode('ascii').strip().replace('\n', '')
         return stdout.strip().replace('\n', '')
+
+    def _aes_encrypt_windows_cng(self, key, data):
+        """AES-ECB through Windows CNG, requiring no Python package or OpenSSL."""
+        import ctypes
+        from ctypes import wintypes
+
+        bcrypt = ctypes.WinDLL('bcrypt.dll')
+        bcrypt.BCryptOpenAlgorithmProvider.restype = wintypes.LONG
+        bcrypt.BCryptSetProperty.restype = wintypes.LONG
+        bcrypt.BCryptGetProperty.restype = wintypes.LONG
+        bcrypt.BCryptGenerateSymmetricKey.restype = wintypes.LONG
+        bcrypt.BCryptEncrypt.restype = wintypes.LONG
+        bcrypt.BCryptDestroyKey.restype = wintypes.LONG
+        bcrypt.BCryptCloseAlgorithmProvider.restype = wintypes.LONG
+
+        algorithm = wintypes.HANDLE()
+        secret = wintypes.HANDLE()
+        try:
+            status = bcrypt.BCryptOpenAlgorithmProvider(
+                ctypes.byref(algorithm), 'AES', None, 0)
+            if status != 0:
+                raise OSError('BCryptOpenAlgorithmProvider failed: 0x%08x' %
+                              (status & 0xffffffff))
+
+            chaining = 'ChainingModeECB'.encode('utf-16-le') + b'\x00\x00'
+            chaining_buffer = ctypes.create_string_buffer(chaining)
+            status = bcrypt.BCryptSetProperty(
+                algorithm, 'ChainingMode', chaining_buffer, len(chaining), 0)
+            if status != 0:
+                raise OSError('BCryptSetProperty failed: 0x%08x' %
+                              (status & 0xffffffff))
+
+            object_length = wintypes.ULONG()
+            returned = wintypes.ULONG()
+            status = bcrypt.BCryptGetProperty(
+                algorithm, 'ObjectLength', ctypes.byref(object_length),
+                ctypes.sizeof(object_length), ctypes.byref(returned), 0)
+            if status != 0:
+                raise OSError('BCryptGetProperty failed: 0x%08x' %
+                              (status & 0xffffffff))
+
+            key_object = ctypes.create_string_buffer(object_length.value)
+            key_buffer = ctypes.create_string_buffer(key)
+            status = bcrypt.BCryptGenerateSymmetricKey(
+                algorithm, ctypes.byref(secret), key_object, object_length.value,
+                key_buffer, len(key), 0)
+            if status != 0:
+                raise OSError('BCryptGenerateSymmetricKey failed: 0x%08x' %
+                              (status & 0xffffffff))
+
+            source = ctypes.create_string_buffer(data)
+            output = ctypes.create_string_buffer(len(data))
+            written = wintypes.ULONG()
+            status = bcrypt.BCryptEncrypt(
+                secret, source, len(data), None, None, 0,
+                output, len(output), ctypes.byref(written), 0)
+            if status != 0:
+                raise OSError('BCryptEncrypt failed: 0x%08x' %
+                              (status & 0xffffffff))
+            return output.raw[:written.value]
+        finally:
+            if secret:
+                bcrypt.BCryptDestroyKey(secret)
+            if algorithm:
+                bcrypt.BCryptCloseAlgorithmProvider(algorithm, 0)
 
     def _choose_service(self, service_list, service_type):
         if not isinstance(service_list, list) or not service_list:
@@ -1378,6 +1457,27 @@ if __name__ == '__main__':
     loger = Netlogin()
     l = len(sys.argv)
     name = sys.argv[0]
+    if l >= 2 and sys.argv[1] in ('account-status-stdin', 'account-offline-devices-stdin'):
+        try:
+            payload = json.load(sys.stdin)
+            user = text_value(payload.get('username', '')).strip()
+            pwd = text_value(payload.get('password', ''))
+            if not user or not pwd:
+                raise ValueError('账号或密码为空')
+            if sys.argv[1] == 'account-status-stdin':
+                result = loger.account_status(user, pwd)
+                success = bool((result.get('summary') or {}).get('casLoginOk'))
+            else:
+                uuids = payload.get('onlineUserUuids')
+                if uuids is not None and not isinstance(uuids, list):
+                    raise ValueError('onlineUserUuids 必须是数组或 null')
+                result = loger.account_offline_devices(user, pwd, uuids)
+                success = not bool((result.get('summary') or {}).get('errors'))
+            print(json.dumps(result, ensure_ascii=False))
+            sys.exit(0 if success else 1)
+        except Exception as e:
+            print(json.dumps({'ok': False, 'message': text_value(e)}, ensure_ascii=False))
+            sys.exit(2)
     if l >= 2 and sys.argv[1] == 'login-stdin':
         try:
             payload = json.load(sys.stdin)

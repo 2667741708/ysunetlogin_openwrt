@@ -28,8 +28,8 @@ from heartbeat import (
 from netlogin import Netlogin
 
 APP_NAME = 'YSUNetloginManager'
-APP_VERSION = '2.1.1'
-CONFIG_VERSION = 5
+APP_VERSION = '2.1.2'
+CONFIG_VERSION = 6
 LOCAL_HOST_ID = 'local-windows'
 SERVICES = {'0': '校园网', '1': '中国移动', '2': '中国联通', '3': '中国电信'}
 SERVICE_IDS = {value: key for key, value in SERVICES.items()}
@@ -81,6 +81,13 @@ try:
     elif payload['action'] == 'logout':
         args = [sys.executable, handle.name, 'logout']
         child_input = None
+    elif payload['action'] == 'account-status':
+        args = [sys.executable, handle.name, 'account-status-stdin']
+        child_input = json.dumps(payload['account'], ensure_ascii=False)
+    elif payload['action'] == 'account-offline-devices':
+        args = [sys.executable, handle.name, 'account-offline-devices-stdin']
+        child_input = json.dumps(dict(payload['account'],
+            onlineUserUuids=payload.get('online_user_uuids')), ensure_ascii=False)
     else:
         args = [sys.executable, handle.name, 'login-stdin']
         child_input = json.dumps(payload['account'], ensure_ascii=False)
@@ -191,6 +198,13 @@ class ConfigStore:
                     changed = True
         if not any(host.get('id') == LOCAL_HOST_ID for host in self.data.get('hosts') or []):
             self.data.setdefault('hosts', []).insert(0, default_local_host())
+            changed = True
+        valid_host_ids = {host.get('id') for host in self.data.get('hosts') or []}
+        if self.data.get('account_query_host_id') not in valid_host_ids:
+            preferred = next((host for host in self.data.get('hosts') or []
+                              if host.get('target') in ('c201-4090', 'c201-4090-wg')), None)
+            self.data['account_query_host_id'] = (
+                preferred.get('id') if preferred else LOCAL_HOST_ID)
             changed = True
         self.data['version'] = CONFIG_VERSION
         if changed and self.path.exists():
@@ -362,15 +376,16 @@ def local_port_ready(port, timeout=0.2):
         return False
 
 
-def run_remote_script_file(host, action, account=None, timeout=30):
+def run_remote_script_file(host, action, account=None, timeout=30,
+                           remote_python='python3'):
     if action == 'status':
-        args = ['python3', host['script'], 'current-status', '--json']
+        args = [remote_python, host['script'], 'current-status', '--json']
         stdin = None
     elif action == 'logout':
-        args = ['python3', host['script'], 'logout']
+        args = [remote_python, host['script'], 'logout']
         stdin = None
     else:
-        args = ['python3', host['script'], 'login-stdin']
+        args = [remote_python, host['script'], 'login-stdin']
         stdin = json.dumps({
             'username': account['username'],
             'password': unprotect_secret(account['password']),
@@ -382,12 +397,14 @@ def run_remote_script_file(host, action, account=None, timeout=30):
         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
 
 
-def run_embedded_netlogin(host, action, account=None, timeout=30):
+def run_embedded_netlogin(host, action, account=None, timeout=30,
+                          remote_python='python3', online_user_uuids=None):
     payload = {
         'action': action,
         'script_b64': base64.b64encode(load_bundled_netlogin_source().encode('utf-8')).decode('ascii'),
         'timeout': timeout,
         'account': None,
+        'online_user_uuids': online_user_uuids,
     }
     if action not in ('status', 'logout'):
         payload['account'] = {
@@ -398,7 +415,7 @@ def run_embedded_netlogin(host, action, account=None, timeout=30):
     payload_b64 = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode('utf-8')).decode('ascii')
     remote_program = "PAYLOAD_B64 = %r\n%s\n" % (payload_b64, REMOTE_BOOTSTRAP)
     return subprocess.run(
-        ssh_command(host, ['python3', '-']),
+        ssh_command(host, [remote_python, '-']),
         input=remote_program, text=True, capture_output=True,
         timeout=timeout + 15, encoding='utf-8', errors='replace',
         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -412,7 +429,31 @@ def remote_script_is_missing(completed):
         'no such file or directory' in lowered or '[errno 2]' in lowered)
 
 
-def _run_remote_unlocked(host, action, account=None, timeout=30):
+def detect_remote_python(host):
+    candidates = []
+    if host.get('remote_python'):
+        candidates.append(host['remote_python'])
+    for value in ('python3', 'python', 'python.exe'):
+        if value not in candidates:
+            candidates.append(value)
+    failures = []
+    for candidate in candidates:
+        try:
+            completed = subprocess.run(
+                ssh_command(host, [candidate, '-c', 'import sys; print(sys.executable)']),
+                text=True, capture_output=True, timeout=12, encoding='utf-8',
+                errors='replace', creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        except subprocess.TimeoutExpired:
+            failures.append('%s 超时' % candidate)
+            continue
+        if completed.returncode == 0 and completed.stdout.strip():
+            return candidate
+        failures.append('%s 不可用' % candidate)
+    raise RuntimeError('远端未找到可用 Python（%s）' % '；'.join(failures))
+
+
+def _run_remote_unlocked(host, action, account=None, timeout=30,
+                         online_user_uuids=None):
     try:
         identity = subprocess.run(
             ssh_command(host, ['hostname']), text=True, capture_output=True,
@@ -432,12 +473,17 @@ def _run_remote_unlocked(host, action, account=None, timeout=30):
             'hostname': identity.stdout.strip(),
             'target': host['target'],
         }
+    remote_python = detect_remote_python(host)
     if host.get('script'):
-        completed = run_remote_script_file(host, action, account, timeout)
+        completed = run_remote_script_file(
+            host, action, account, timeout, remote_python=remote_python)
         if remote_script_is_missing(completed):
-            completed = run_embedded_netlogin(host, action, account, timeout)
+            completed = run_embedded_netlogin(
+                host, action, account, timeout, remote_python=remote_python)
     else:
-        completed = run_embedded_netlogin(host, action, account, timeout)
+        completed = run_embedded_netlogin(
+            host, action, account, timeout, remote_python=remote_python,
+            online_user_uuids=online_user_uuids)
     output = (completed.stdout or completed.stderr).strip()
     try:
         result = json.loads(output)
@@ -508,6 +554,29 @@ def run_target(host, action, account=None, timeout=30):
         if host.get('connection_type') == 'local' or host.get('id') == LOCAL_HOST_ID:
             return _run_local_unlocked(host, action, account, timeout)
         return _run_remote_unlocked(host, action, account, timeout)
+
+
+def run_account_device_operation(host, action, account, online_user_uuids=None,
+                                 timeout=60):
+    """Run account device queries where the chosen network session exists."""
+    lock_key = host.get('id') or host.get('target') or 'account-query'
+    with _REMOTE_LOCKS_GUARD:
+        lock = _REMOTE_LOCKS.setdefault(lock_key, threading.Lock())
+    with lock:
+        if host.get('connection_type') == 'local' or host.get('id') == LOCAL_HOST_ID:
+            netlogin = Netlogin()
+            password = unprotect_secret(account['password'])
+            if action == 'query':
+                return netlogin.account_status(account['username'], password)
+            return netlogin.account_offline_devices(
+                account['username'], password, online_user_uuids)
+        embedded_host = dict(host)
+        embedded_host['script'] = ''
+        remote_action = ('account-status' if action == 'query'
+                         else 'account-offline-devices')
+        return _run_remote_unlocked(
+            embedded_host, remote_action, account, timeout,
+            online_user_uuids=online_user_uuids)
 
 
 def run_remote(host, action, account=None, timeout=30):
@@ -708,8 +777,18 @@ class DesktopApp(tk.Tk):
         ttk.Button(buttons, text='保存账号', style='Primary.TButton', command=self.save_account).pack(side='left')
         ttk.Button(buttons, text='删除', command=self.delete_account).pack(side='left', padx=8)
         ttk.Label(right, text='密码使用 Windows DPAPI 加密，只能由当前 Windows 用户解密。', foreground='#66736d', background='#fffdf7').grid(row=9, column=0, sticky='w')
+        query_location = ttk.Frame(right, style='Panel.TFrame')
+        query_location.grid(row=10, column=0, sticky='ew', pady=(14, 2))
+        ttk.Label(query_location, text='在线设备查询位置', background='#ffffff').pack(
+            side='left', padx=(0, 10))
+        self.account_query_host_var = tk.StringVar()
+        self.account_query_host = ttk.Combobox(
+            query_location, state='readonly', width=42,
+            textvariable=self.account_query_host_var)
+        self.account_query_host.pack(side='left', fill='x', expand=True)
+        self.account_query_host.bind('<<ComboboxSelected>>', self.save_account_query_host)
         device_buttons = ttk.Frame(right, style='Panel.TFrame')
-        device_buttons.grid(row=10, column=0, sticky='w', pady=(18, 8))
+        device_buttons.grid(row=11, column=0, sticky='w', pady=(12, 8))
         self.account_query_button = ttk.Button(device_buttons, text='查询在线设备', command=self.query_account_devices)
         self.account_query_button.pack(side='left')
         self.account_kick_selected_button = ttk.Button(device_buttons, text='踢选中设备', command=self.kick_selected_account_devices)
@@ -720,9 +799,9 @@ class DesktopApp(tk.Tk):
             right, text='先查询该账号在线设备，再按需下线。',
             foreground='#66736d', background='#fffdf7', wraplength=920,
             justify='left')
-        self.account_device_hint.grid(row=11, column=0, sticky='w')
+        self.account_device_hint.grid(row=12, column=0, sticky='w')
         device_list_frame = ttk.Frame(right, style='Panel.TFrame')
-        device_list_frame.grid(row=12, column=0, sticky='nsew', pady=(8, 0))
+        device_list_frame.grid(row=13, column=0, sticky='nsew', pady=(8, 0))
         self.account_device_list = tk.Listbox(device_list_frame, height=7, exportselection=False)
         device_y_scroll = ttk.Scrollbar(device_list_frame, orient='vertical', command=self.account_device_list.yview)
         device_x_scroll = ttk.Scrollbar(device_list_frame, orient='horizontal', command=self.account_device_list.xview)
@@ -735,7 +814,7 @@ class DesktopApp(tk.Tk):
         self.account_device_list.bind('<MouseWheel>', self.scroll_account_devices)
         self.account_device_list.bind('<Shift-MouseWheel>', self.scroll_account_devices_horizontal)
         right.columnconfigure(0, weight=1)
-        right.rowconfigure(12, weight=1)
+        right.rowconfigure(13, weight=1)
 
     def build_hosts_tab(self):
         left = ttk.Frame(self.hosts_tab, style='Panel.TFrame')
@@ -837,6 +916,16 @@ class DesktopApp(tk.Tk):
         self.host_account['values'] = ['（不设置）'] + account_names
         self.op_host['values'] = host_names
         self.heartbeat_host['values'] = host_names
+        self.account_query_hosts = [
+            ('%s · %s' % (host['name'], host.get('target') or 'local'), host)
+            for host in self.hosts
+        ]
+        self.account_query_host['values'] = [item[0] for item in self.account_query_hosts]
+        selected_query_id = self.store.data.get('account_query_host_id')
+        selected_query = next((item[0] for item in self.account_query_hosts
+                               if item[1].get('id') == selected_query_id), '')
+        if selected_query:
+            self.account_query_host_var.set(selected_query)
         if host_names and not self.op_host.get():
             self.op_host.current(0)
             self.apply_host_default()
@@ -1067,6 +1156,24 @@ class DesktopApp(tk.Tk):
             raise ValueError('请先选择一个已保存的校园网账号。')
         return account
 
+    def selected_account_query_host(self):
+        display = self.account_query_host_var.get()
+        host = next((item[1] for item in self.account_query_hosts
+                     if item[0] == display), None)
+        if not host:
+            raise ValueError('请选择在线设备查询位置。')
+        return host
+
+    def save_account_query_host(self, event=None):
+        try:
+            host = self.selected_account_query_host()
+        except ValueError as exc:
+            return messagebox.showerror('查询位置不可用', str(exc))
+        self.store.data['account_query_host_id'] = host['id']
+        self.store.save()
+        self.clear_account_devices(
+            '查询位置已改为 %s；请重新查询在线设备。' % host['name'])
+
     def account_device_display(self, item):
         parts = [
             '当前设备' if item.get('currentDevice') else '',
@@ -1100,21 +1207,23 @@ class DesktopApp(tk.Tk):
         try:
             account = self.selected_saved_account()
             password = unprotect_secret(account['password'])
+            query_host = self.selected_account_query_host()
         except Exception as exc:
             return messagebox.showerror('账号不可用', str(exc))
         self.set_account_device_busy(True)
-        self.account_device_hint.configure(text='正在处理 %s，请稍候……' % account['name'])
+        self.account_device_hint.configure(
+            text='正在通过 %s 处理 %s，请稍候……' % (query_host['name'], account['name']))
 
         def worker():
             try:
-                netlogin = Netlogin()
                 if action == 'query':
-                    result = netlogin.account_status(account['username'], password)
+                    result = run_account_device_operation(query_host, 'query', account)
                     summary = result.get('summary') or {}
                     devices = summary.get('devices') or []
-                    text = '在线设备数：%s' % summary.get('onlineDeviceCount', 0)
+                    text = '执行位置：%s；在线设备数：%s' % (
+                        query_host['name'], summary.get('onlineDeviceCount', 0))
                     if summary.get('querySource') == 'current-session':
-                        text += '；已复用本机当前认证会话'
+                        text += '；已复用该位置的当前认证会话'
                     errors = result.get('errors') or []
                     if errors:
                         text += '；警告：%s' % '；'.join(errors)
@@ -1125,13 +1234,16 @@ class DesktopApp(tk.Tk):
                         text += '；学校接口本次只返回 1 台设备，未返回其他会话'
                     self.after(0, lambda: self.show_account_devices(devices, text))
                 else:
-                    result = netlogin.account_offline_devices(account['username'], password, uuids)
+                    result = run_account_device_operation(
+                        query_host, 'kick', account, uuids)
                     summary = result.get('summary') or {}
-                    text = '已请求下线设备数：%s；结果：%s' % (
-                        summary.get('targetCount', 0), summary.get('message') or '—')
+                    text = '执行位置：%s；已请求下线设备数：%s；结果：%s' % (
+                        query_host['name'], summary.get('targetCount', 0),
+                        summary.get('message') or '—')
                     if summary.get('errors'):
                         text += '；错误：%s' % '；'.join(summary.get('errors'))
-                    refreshed = netlogin.account_status(account['username'], password)
+                    refreshed = run_account_device_operation(
+                        query_host, 'query', account)
                     devices = (refreshed.get('summary') or {}).get('devices') or []
                     self.after(0, lambda: self.show_account_devices(devices, text))
             except Exception as exc:

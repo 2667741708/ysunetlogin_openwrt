@@ -6,6 +6,27 @@ import desktop_gui
 
 
 class RemoteFallbackTests(unittest.TestCase):
+    def test_remote_account_query_uses_bundled_script(self):
+        host = {
+            'id': 'remote-1',
+            'connection_type': 'ssh',
+            'target': 'example-host',
+            'script': '/custom/netlogin.py',
+        }
+        account = {'username': 'demo', 'password': 'encrypted', 'service': '1'}
+        expected = {'summary': {'onlineDeviceCount': 1}}
+        with mock.patch.object(
+                desktop_gui, '_run_remote_unlocked', return_value=expected) as run:
+            result = desktop_gui.run_account_device_operation(
+                host, 'query', account, timeout=45)
+
+        self.assertEqual(expected, result)
+        embedded_host = dict(host)
+        embedded_host['script'] = ''
+        run.assert_called_once_with(
+            embedded_host, 'account-status', account, 45,
+            online_user_uuids=None)
+
     def test_missing_configured_script_retries_with_bundled_copy(self):
         host = {
             'target': 'example-host',
@@ -30,7 +51,22 @@ class RemoteFallbackTests(unittest.TestCase):
 
         self.assertTrue(result['ok'])
         self.assertEqual('embedded', result['message'])
-        retry.assert_called_once_with(host, 'status', None, 30)
+        retry.assert_called_once_with(
+            host, 'status', None, 30, remote_python='python3')
+
+    def test_windows_style_target_falls_back_from_python3_to_python(self):
+        host = {'target': 'windows-host'}
+        unavailable = mock.Mock(returncode=1, stdout='', stderr='not found')
+        available = mock.Mock(
+            returncode=0,
+            stdout=r'C:\Python313\python.exe' + '\n',
+            stderr='',
+        )
+        with mock.patch.object(
+                desktop_gui.subprocess, 'run', side_effect=[unavailable, available]):
+            selected = desktop_gui.detect_remote_python(host)
+
+        self.assertEqual('python', selected)
 
     def test_other_remote_script_errors_are_not_retried(self):
         host = {

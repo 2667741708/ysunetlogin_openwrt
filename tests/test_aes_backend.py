@@ -10,12 +10,13 @@ class CryptographyBackendTests(unittest.TestCase):
     def test_windows_fallback_matches_aes_known_answer(self):
         original_import = builtins.__import__
 
-        def without_pycrypto(name, *args, **kwargs):
-            if name == 'Crypto' or name.startswith('Crypto.'):
-                raise ImportError('Exercise cryptography fallback')
+        def without_python_crypto(name, *args, **kwargs):
+            if (name == 'Crypto' or name.startswith('Crypto.') or
+                    name == 'cryptography' or name.startswith('cryptography.')):
+                raise ImportError('Exercise Windows CNG fallback')
             return original_import(name, *args, **kwargs)
 
-        with mock.patch('builtins.__import__', side_effect=without_pycrypto):
+        with mock.patch('builtins.__import__', side_effect=without_python_crypto):
             with mock.patch('netlogin.subprocess.Popen') as openssl:
                 key = base64.b64encode(b'Thats my Kung Fu').decode('ascii')
                 encoded = Netlogin()._aes_encrypt_b64(key, 'Two One Nine Two')

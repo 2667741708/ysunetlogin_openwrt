@@ -56,6 +56,22 @@ class AccountDeviceStatusTests(unittest.TestCase):
         self.assertIn('HTTP 401', result['errors'][0])
         self.assertNotIn('None', result['errors'][0])
 
+    def test_kick_reuses_matching_current_session(self):
+        netlogin = Netlogin()
+        status = netlogin._account_status_from_current(current_status(), '20260001')
+        with patch.object(netlogin, 'account_status', return_value=status), \
+                patch.object(netlogin, '_cas_login_only') as cas_login, \
+                patch.object(netlogin, '_session_json', return_value={
+                    'code': 200, 'message': 'OK'
+                }) as request:
+            result = netlogin.account_offline_devices(
+                '20260001', 'secret', ['device-1'])
+
+        self.assertTrue(result['summary']['changed'])
+        self.assertEqual(1, result['summary']['targetCount'])
+        cas_login.assert_not_called()
+        self.assertEqual('session-current', request.call_args.args[2]['sessionId'])
+
 
 if __name__ == '__main__':
     unittest.main()
