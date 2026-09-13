@@ -41,6 +41,29 @@ class NoRedirectHandler(
         return None
 
 
+def direct_proxy_handler():
+    '''Disable OS, PAC and environment proxies for campus-network traffic.'''
+    if VERSION == 3:
+        return urllib.request.ProxyHandler({})
+    return urllib2.ProxyHandler({})
+
+
+def build_direct_opener(*handlers):
+    all_handlers = [direct_proxy_handler()]
+    all_handlers.extend(handlers)
+    if VERSION == 3:
+        return urllib.request.build_opener(*all_handlers)
+    return urllib2.build_opener(*all_handlers)
+
+
+def configured_proxy_schemes():
+    try:
+        proxies = urllib.request.getproxies() if VERSION == 3 else urllib.getproxies()
+    except Exception:
+        proxies = {}
+    return sorted(text_value(key) for key, value in proxies.items() if value)
+
+
 def urlencode(data):
     if VERSION == 2:
         data = utf8_form_data(data)
@@ -190,10 +213,10 @@ def post(url, headers=None, data=None, timeout=DEFAULT_TIMEOUT):
     if VERSION == 3:
         data = data.encode('utf-8')
         request = urllib.request.Request(url, headers=headers, data=data)
-        response = urllib.request.urlopen(request, timeout=timeout)
+        response = build_direct_opener().open(request, timeout=timeout)
     else:
         request = urllib2.Request(url, headers=headers, data=data)
-        response = urllib2.urlopen(request, timeout=timeout)
+        response = build_direct_opener().open(request, timeout=timeout)
 
     return response
 
@@ -204,16 +227,16 @@ def get(url, headers=None, timeout=DEFAULT_TIMEOUT, allow_redirects=True):
     if VERSION == 3:
         request = urllib.request.Request(url, headers=headers)
         if allow_redirects:
-            response = urllib.request.urlopen(request, timeout=timeout)
+            response = build_direct_opener().open(request, timeout=timeout)
         else:
-            opener = urllib.request.build_opener(NoRedirectHandler)
+            opener = build_direct_opener(NoRedirectHandler())
             response = opener.open(request, timeout=timeout)
     else:
         request = urllib2.Request(url, headers=headers)
         if allow_redirects:
-            response = urllib2.urlopen(request, timeout=timeout)
+            response = build_direct_opener().open(request, timeout=timeout)
         else:
-            opener = urllib2.build_opener(NoRedirectHandler)
+            opener = build_direct_opener(NoRedirectHandler())
             response = opener.open(request, timeout=timeout)
 
     return response
@@ -344,7 +367,7 @@ class Netlogin():
             jar = http.cookiejar.CookieJar()
 
             def build(no_redirect=False):
-                handlers = [urllib.request.HTTPCookieProcessor(jar)]
+                handlers = [direct_proxy_handler(), urllib.request.HTTPCookieProcessor(jar)]
                 https_handler = self._https_handler()
                 if https_handler:
                     handlers.append(https_handler)
@@ -355,7 +378,7 @@ class Netlogin():
             jar = cookielib.CookieJar()
 
             def build(no_redirect=False):
-                handlers = [urllib2.HTTPCookieProcessor(jar)]
+                handlers = [direct_proxy_handler(), urllib2.HTTPCookieProcessor(jar)]
                 https_handler = self._https_handler()
                 if https_handler:
                     handlers.append(https_handler)
@@ -589,7 +612,14 @@ class Netlogin():
         '''
         openers = self._new_cookie_openers()
         session_info = self._auth1_session_info(openers)
-        return self._query_machine_result(session_info)
+        result = self._query_machine_result(session_info)
+        proxy_schemes = configured_proxy_schemes()
+        result['proxyDetected'] = bool(proxy_schemes)
+        result['proxySchemes'] = proxy_schemes
+        result['proxyBypassed'] = True
+        if result.get('ok') and proxy_schemes:
+            result['message'] += '；已绕过本机代理设置'
+        return result
 
     def _account_status_from_current(self, current, user):
         status = {
@@ -1386,6 +1416,50 @@ class Netlogin():
 
         return False
 
+    def _manual_target_matches(self, summary, user, service_type):
+        summary = summary or {}
+        actual_user = self._normalized_account(
+            summary.get('userId') or summary.get('userName'))
+        expected_user = self._normalized_account(user)
+        actual_service = text_value(summary.get('service')).strip().lower()
+        expected_service = text_value(
+            self.services.get(text_value(service_type), service_type)).strip().lower()
+        service_matches = bool(
+            actual_service and expected_service and
+            (actual_service == expected_service or actual_service == text_value(service_type)))
+        return bool(summary.get('online') and actual_user == expected_user
+                    and service_matches)
+
+    def ensure_login(self, user, pwd, service_type, code=''):
+        '''
+        Explicitly ensure this machine uses the requested account and operator.
+        Unlike heartbeat assessment, an unidentifiable existing session is not
+        treated as success after the user explicitly requests a connection.
+        '''
+        qualification = self.query_machine_status()
+        if not qualification.get('ok'):
+            return (False, qualification.get('message') or
+                    '需要先实现访问校园局域网')
+
+        current = self.current_status()
+        summary = current.get('summary') or {}
+        if self._manual_target_matches(summary, user, service_type):
+            return (True, '本机已使用指定账号和运营商在线')
+
+        switched = False
+        if summary.get('online'):
+            logout_state, logout_message = self.logout()
+            if not logout_state:
+                return (False, '切换到指定账号前无法下线旧会话：%s' % logout_message)
+            switched = True
+
+        self.isLogined = False
+        self.queryString = None
+        state, message = self.login(user=user, pwd=pwd, type=service_type, code=code)
+        if state and switched:
+            message = '已自动下线旧会话；%s' % message
+        return (state, message)
+
 
     def login(self,user,pwd,type,code=''):
         '''
@@ -1553,7 +1627,8 @@ if __name__ == '__main__':
             service_type = text_value(payload.get('service', '')).strip()
             if service_type not in loger.services:
                 raise ValueError('运营商编号必须是 0、1、2 或 3')
-            state, info = loger.login(user=user, pwd=pwd, type=service_type)
+            state, info = loger.ensure_login(
+                user=user, pwd=pwd, service_type=service_type)
             print(json.dumps({
                 'ok': bool(state),
                 'message': text_value(info),
