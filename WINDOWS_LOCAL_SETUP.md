@@ -1,10 +1,10 @@
 # YSU Netlogin 自愈版：Windows 本机使用与配置
 
-适用版本：`2.1.1`；适用系统：Windows 10/11 x64。
+适用版本：`2.1.2`；适用系统：Windows 10/11 x64。
 
 ## 1. 下载与启动
 
-1. 在 GitHub 仓库的 Releases 页面下载 `ysu-netlogin-healing-2.1.1-windows-x64.zip`。
+1. 在 GitHub 仓库的 Releases 页面下载 `ysu-netlogin-healing-2.1.2-windows-x64.zip`。
 2. 将压缩包完整解压到一个长期不移动的目录，例如 `D:\Tools\YSU-Netlogin`。
 3. 双击 `YSU-Netlogin-Healing-Manager.exe`。
 4. Windows SmartScreen 首次提示时，先核对发布页 SHA256，再选择“更多信息 → 仍要运行”。本程序目前没有商业代码签名证书。
@@ -41,6 +41,16 @@
 ![使用指定账号与运营商连接本机](docs/screenshots/v2.1.0/05-local-login.jpg)
 
 本机操作不需要 OpenSSH、远端 Python 或服务器。只有管理远端服务器时才需要下面的 SSH 配置。
+
+### 指定在线设备查询位置
+
+“查询在线设备”读取的是执行位置所在机器的 auth1 校园网会话。若账号已经在
+4090 上线，而本机使用另一个账号，应在“校园网账号”页把“在线设备查询位置”
+选择为 4090。2.1.2 会优先把已有的 `c201-4090` 连接设为默认位置，也可以随时
+改回本机或其他服务器。
+
+查询位置必须能够访问学校认证网络；所选账号与该位置当前在线账号一致时，程序
+会复用当前会话，不重复登录。跨账号查询仍可能需要认证服务器接受保存的账号密码。
 
 ## 4. 准备远端 SSH 连接（可选）
 

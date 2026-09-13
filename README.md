@@ -159,7 +159,7 @@ Windows 自愈版的下载、SSH、账号绑定、心跳与开机启动配置见
 完整发布包可执行：
 
 ```powershell
-.\release_windows.ps1 -Version 2.1.1
+.\release_windows.ps1 -Version 2.1.2
 ```
 
 流水线会依次运行自动测试、安全审计、PyInstaller 打包、EXE `--self-test`、发布目录审计、

@@ -51,7 +51,7 @@ class ConfigMigrationTests(unittest.TestCase):
 
             host = next(item for item in store.data["hosts"] if item["id"] == "host-1")
             local = next(item for item in store.data["hosts"] if item["id"] == desktop_gui.LOCAL_HOST_ID)
-            self.assertEqual(5, store.data["version"])
+            self.assertEqual(6, store.data["version"])
             self.assertNotIn("identity_file", host)
             self.assertNotIn("private_key", host)
             self.assertEqual("ssh", host["connection_type"])
@@ -60,6 +60,8 @@ class ConfigMigrationTests(unittest.TestCase):
             self.assertEqual(2, host["heartbeat_failure_threshold"])
             self.assertEqual("local", local["connection_type"])
             self.assertEqual("本机 Windows", local["name"])
+            self.assertEqual(desktop_gui.LOCAL_HOST_ID,
+                             store.data["account_query_host_id"])
             persisted = config_path.read_text(encoding="utf-8")
             self.assertNotIn("id_ed25519", persisted)
             self.assertNotIn("must-not-survive", persisted)
@@ -90,6 +92,7 @@ class ConfigMigrationTests(unittest.TestCase):
             host = next(item for item in store.data["hosts"] if item["id"] == "legacy-4090")
             self.assertEqual("", host["expected_hostname"])
             self.assertEqual("", host["script"])
+            self.assertEqual("legacy-4090", store.data["account_query_host_id"])
 
     def test_custom_remote_path_is_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
