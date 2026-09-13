@@ -28,7 +28,7 @@ from heartbeat import (
 from netlogin import Netlogin
 
 APP_NAME = 'YSUNetloginManager'
-APP_VERSION = '2.1.3'
+APP_VERSION = '2.1.4'
 CONFIG_VERSION = 6
 LOCAL_HOST_ID = 'local-windows'
 SERVICES = {'0': '校园网', '1': '中国移动', '2': '中国联通', '3': '中国电信'}
@@ -523,29 +523,11 @@ def _run_local_unlocked(host, action, account=None, timeout=30):
         return {'ok': bool(state), 'message': message, 'targetType': 'local'}
     if not account:
         return {'ok': False, 'message': '未选择用于本机联网的账号'}
-    current = netlogin.current_status()
-    assessment = assess_status(current, account)
-    summary = current.get('summary') or {}
-    if assessment.get('healthy'):
-        if summary.get('online'):
-            message = '本机已使用指定账号和运营商在线'
-        else:
-            message = assessment.get('reason') or '本机外网已连接'
-        return {'ok': True, 'message': message, 'targetType': 'local'}
-    if assessment.get('needs_logout'):
-        logout_state, logout_message = netlogin.logout()
-        if not logout_state:
-            return {
-                'ok': False,
-                'message': '切换到指定账号前无法下线旧会话：%s' % logout_message,
-                'targetType': 'local',
-            }
-        netlogin = Netlogin()
     password = unprotect_secret(account.get('password', ''))
-    state, message = netlogin.login(
+    state, message = netlogin.ensure_login(
         user=account.get('username', ''),
         pwd=password,
-        type=str(account.get('service', '')),
+        service_type=str(account.get('service', '')),
     )
     return {
         'ok': bool(state),

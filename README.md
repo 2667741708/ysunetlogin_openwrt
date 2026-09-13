@@ -31,6 +31,10 @@ Windows 自愈版的下载、SSH、账号绑定、心跳与开机启动配置见
 - 登录成功后继续调用 portal 工作流，处理 `serviceSelection` 并选择配置的运营商服务。
 - 保留旧 `InterFace.do` 登录逻辑作为兜底，方便旧环境继续使用。
 - 为网络探测增加超时和禁止自动重定向，避免被 `123.123.123.123` 等 captive portal 地址卡住。
+- 校园网探测、CAS 和 portal 请求显式绕过 Windows 系统代理、PAC 和代理环境变量，避免失效代理阻断校园 Wi-Fi 直连认证。
+- 用户明确点击连接时，必须核实当前账号和运营商；无法确认或不一致时会自动下线旧校园网会话，再登录所选配置。
+
+这里的代理绕过针对操作系统代理、PAC 和 `HTTP_PROXY`/`HTTPS_PROXY` 等环境变量。若代理软件使用 TUN、透明代理或网络过滤驱动接管所有直连流量，仍需在代理软件中把 `auth.ysu.edu.cn`、`auth1.ysu.edu.cn`、`10.11.0.1` 和校园网段配置为直连。
 
 如果你的网络环境仍然使用旧认证接口，脚本会自动回退；如果已经升级到新 portal，则会优先走新流程。
 
@@ -191,7 +195,7 @@ SSH 用户有执行权限、账号密码有效，并且该账号确实开通了�
 完整发布包可执行：
 
 ```powershell
-.\release_windows.ps1 -Version 2.1.3
+.\release_windows.ps1 -Version 2.1.4
 ```
 
 流水线会依次运行自动测试、安全审计、PyInstaller 打包、EXE `--self-test`、发布目录审计、
