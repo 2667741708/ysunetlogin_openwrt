@@ -28,7 +28,7 @@ from heartbeat import (
 from netlogin import Netlogin
 
 APP_NAME = 'YSUNetloginManager'
-APP_VERSION = '2.1.2'
+APP_VERSION = '2.1.3'
 CONFIG_VERSION = 6
 LOCAL_HOST_ID = 'local-windows'
 SERVICES = {'0': '校园网', '1': '中国移动', '2': '中国联通', '3': '中国电信'}
@@ -77,6 +77,9 @@ try:
     handle.close()
     if payload['action'] == 'status':
         args = [sys.executable, handle.name, 'current-status', '--json']
+        child_input = None
+    elif payload['action'] == 'query-machine-status':
+        args = [sys.executable, handle.name, 'query-machine-status']
         child_input = None
     elif payload['action'] == 'logout':
         args = [sys.executable, handle.name, 'logout']
@@ -381,6 +384,9 @@ def run_remote_script_file(host, action, account=None, timeout=30,
     if action == 'status':
         args = [remote_python, host['script'], 'current-status', '--json']
         stdin = None
+    elif action == 'query-machine-status':
+        args = [remote_python, host['script'], 'query-machine-status']
+        stdin = None
     elif action == 'logout':
         args = [remote_python, host['script'], 'logout']
         stdin = None
@@ -406,7 +412,7 @@ def run_embedded_netlogin(host, action, account=None, timeout=30,
         'account': None,
         'online_user_uuids': online_user_uuids,
     }
-    if action not in ('status', 'logout'):
+    if action not in ('status', 'logout', 'query-machine-status'):
         payload['account'] = {
             'username': account['username'],
             'password': unprotect_secret(account['password']),
@@ -474,7 +480,7 @@ def _run_remote_unlocked(host, action, account=None, timeout=30,
             'target': host['target'],
         }
     remote_python = detect_remote_python(host)
-    if host.get('script'):
+    if host.get('script') and action != 'query-machine-status':
         completed = run_remote_script_file(
             host, action, account, timeout, remote_python=remote_python)
         if remote_script_is_missing(completed):
@@ -503,6 +509,10 @@ def _run_local_unlocked(host, action, account=None, timeout=30):
             'target': '本机 Windows',
         }
     netlogin = Netlogin()
+    if action == 'query-machine-status':
+        result = netlogin.query_machine_status()
+        result['targetType'] = 'local'
+        return result
     if action == 'status':
         result = netlogin.current_status()
         result['ok'] = True
@@ -552,7 +562,17 @@ def run_target(host, action, account=None, timeout=30):
         lock = _REMOTE_LOCKS.setdefault(lock_key, threading.Lock())
     with lock:
         if host.get('connection_type') == 'local' or host.get('id') == LOCAL_HOST_ID:
+            if action == 'login':
+                preflight = _run_local_unlocked(
+                    host, 'query-machine-status', None, timeout)
+                if not preflight.get('ok'):
+                    return preflight
             return _run_local_unlocked(host, action, account, timeout)
+        if action == 'login':
+            preflight = _run_remote_unlocked(
+                host, 'query-machine-status', None, timeout)
+            if not preflight.get('ok'):
+                return preflight
         return _run_remote_unlocked(host, action, account, timeout)
 
 
@@ -787,6 +807,9 @@ class DesktopApp(tk.Tk):
             textvariable=self.account_query_host_var)
         self.account_query_host.pack(side='left', fill='x', expand=True)
         self.account_query_host.bind('<<ComboboxSelected>>', self.save_account_query_host)
+        self.account_machine_check_button = ttk.Button(
+            query_location, text='检查资格', command=self.check_query_machine)
+        self.account_machine_check_button.pack(side='left', padx=(8, 0))
         device_buttons = ttk.Frame(right, style='Panel.TFrame')
         device_buttons.grid(row=11, column=0, sticky='w', pady=(12, 8))
         self.account_query_button = ttk.Button(device_buttons, text='查询在线设备', command=self.query_account_devices)
@@ -1198,8 +1221,36 @@ class DesktopApp(tk.Tk):
         self.account_device_busy = busy
         state = 'disabled' if busy else 'normal'
         self.account_query_button.configure(state=state)
+        self.account_machine_check_button.configure(state=state)
         self.account_kick_selected_button.configure(state=state)
         self.account_kick_all_button.configure(state=state)
+
+    def check_query_machine(self):
+        if self.account_device_busy:
+            return
+        try:
+            query_host = self.selected_account_query_host()
+        except Exception as exc:
+            return messagebox.showerror('查询位置不可用', str(exc))
+        self.set_account_device_busy(True)
+        self.account_device_hint.configure(
+            text='正在检查 %s 是否具备校园网查询条件……' % query_host['name'])
+
+        def worker():
+            try:
+                result = run_target(query_host, 'query-machine-status', timeout=45)
+                state = '符合要求' if result.get('ok') else '不符合要求'
+                text = '执行位置：%s；查询机器资格：%s；%s' % (
+                    query_host['name'], state,
+                    result.get('message') or '未返回检查说明')
+                self.after(0, lambda: self.account_device_hint.configure(text=text))
+            except Exception as exc:
+                error_text = str(exc).strip() or type(exc).__name__
+                self.after(0, lambda value=error_text: self.account_device_hint.configure(
+                    text='查询机器检查失败：%s' % value))
+            finally:
+                self.after(0, lambda: self.set_account_device_busy(False))
+        threading.Thread(target=worker, daemon=True).start()
 
     def run_account_device_async(self, action, uuids=None):
         if self.account_device_busy:
@@ -1218,6 +1269,10 @@ class DesktopApp(tk.Tk):
             try:
                 if action == 'query':
                     result = run_account_device_operation(query_host, 'query', account)
+                    query_machine = result.get('queryMachine') or {}
+                    if query_machine and not query_machine.get('ok'):
+                        raise RuntimeError(
+                            query_machine.get('message') or '需要先实现访问校园局域网')
                     summary = result.get('summary') or {}
                     devices = summary.get('devices') or []
                     text = '执行位置：%s；在线设备数：%s' % (
