@@ -3,6 +3,39 @@
 Windows 自愈版的下载、SSH、账号绑定、心跳与开机启动配置见：
 [Windows 本机使用与配置](WINDOWS_LOCAL_SETUP.md)
 
+2026-09-15 的运营商严格匹配、物理网卡绑定直连、Wi-Fi 主动扫描和有线检测见：
+[校园网直连使用说明](CAMPUS_DIRECT_SETUP.md)。Windows 需要一并更新新增模块，不能只替换 netlogin.py。
+
+### 最新源码：快速使用
+
+从本仓库下载 ZIP 后完整解压，或在已有克隆目录拉取更新。在脚本所在目录执行：
+
+```powershell
+python netlogin.py campus-check
+python netlogin.py wifi-scan
+python netlogin.py current-status
+python netlogin.py "学号" "密码" 1
+```
+
+- `campus-check`：检测无线、有线是否能通过对应物理网卡直连校园认证，默认同时主动扫描 Wi-Fi。
+- `wifi-scan`：仅扫描，不切换 Wi-Fi；`current-status`：仅查询当前账号与实际服务。
+- 登录编号：`0` 校园网、`1` 移动、`2` 联通、`3` 电信；选择失败不会改选 `0`。
+- 检测和状态命令可追加 `--json`。需要切换已有命令行会话时先执行 `python netlogin.py logout`。
+- Windows 需将 `netlogin.py`、`campus_network.py`、`campus_adapters.ps1`、`wifi_scan.py` 放在同一目录。
+
+默认自动扫描和校园网卡检测已开启。需要自定义时，先复制配置模板：
+
+```powershell
+Copy-Item -LiteralPath .\campus_network.example.json -Destination .\campus_network.json
+```
+
+配置中 `scan_wifi` 控制扫描，`preferred_ssid` 默认 `iYanDa`，`interface` 默认 `auto`
+（也可指定 `WLAN` 或实际有线网卡名称），`timeout` 为 1–10 秒。
+个人配置 `campus_network.json` 不纳入 Git；已有配置时直接编辑，不必重复复制模板。
+
+更多示例见 [命令与配置说明](CAMPUS_DIRECT_SETUP.md)，版本变化见 [更新日志](CHANGELOG.md)。
+这是源码更新，旧版 EXE 需重新构建后才包含这些修复。
+
 这个项目提供了一个为燕山大学校园网设计的 OpenWrt 自动认证解决方案。它能够自动处理校园网的认证过程，使您的设备保持持续在线状态。
 
 ## 功能特性
@@ -26,7 +59,7 @@ Windows 自愈版的下载、SSH、账号绑定、心跳与开机启动配置见
 
 本次修复做了这些兼容：
 
-- 先探测外网地址并捕获 `auth1.ysu.edu.cn` 的新 portal 跳转。
+- 优先直连 `auth1.ysu.edu.cn` 获取校园会话，必要时再探测 portal 跳转。
 - 按新页面要求获取 CAS 登录参数，并用 AES-ECB-PKCS7 加密密码。
 - 登录成功后继续调用 portal 工作流，处理 `serviceSelection` 并选择配置的运营商服务。
 - 保留旧 `InterFace.do` 登录逻辑作为兜底，方便旧环境继续使用。
@@ -39,6 +72,31 @@ Windows 自愈版的下载、SSH、账号绑定、心跳与开机启动配置见
 如果你的网络环境仍然使用旧认证接口，脚本会自动回退；如果已经升级到新 portal，则会优先走新流程。
 
 ## 安装指南
+
+### 2026-09-15：运营商选择与核验修复
+
+旧版 `_choose_service()` 在指定运营商名称匹配失败时，会自动选择校园网或列表第一项；
+同时，登录流程只检查是否在线，导致选择 1/2/3 也可能显示“认证成功”但实际仍为校园网。
+
+- 现在只选择唯一匹配的服务，支持“中国移动 / 移动”“中国联通 / 联通”“中国电信 / 电信”。
+- 找不到指定服务或存在多个匹配时，显示服务器返回的服务名称并报错，不再自动改选校园网。
+- 新旧认证流程均核实在线账号和实际服务；服务不符或接口未返回服务时，不报告指定运营商登录成功。
+- 位置参数登录已在线时会核对账号和运营商；不一致会报错，需要先执行 `python netlogin.py logout` 再登录。
+  桌面端和 `login-stdin` 保留原有的显式连接时自动切换行为。
+- `python netlogin.py --status`、`--current-status` 与 `current-status` 均可查询状态；登录失败返回非零退出码。
+
+如果服务器只提供校园网，应在同一电脑、同一网络的学校认证网页检查可选服务、账号绑定和接入区域。
+脚本不能通过填写运营商编号开通服务。移动在线状态已完成本机实测；其他运营商、
+有线接入和 TUN 过滤模式的验证范围见 [更新日志](CHANGELOG.md)。
+
+示例（将占位文字换成自己的信息；运营商编号 1/2/3 分别为移动/联通/电信）：
+
+```text
+python netlogin.py current-status
+python netlogin.py logout
+python netlogin.py "学号" "密码" 1
+python netlogin.py current-status
+```
 
 1. 将 `netlogin.py`、`auth.sh` 和 `daemon.sh` 文件上传到您的 OpenWrt 设备的 `/etc/storage/` 目录。
 

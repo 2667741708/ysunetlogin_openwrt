@@ -4,6 +4,7 @@ __pycache__/
 lan_gui.crt
 lan_gui.key
 lan_gui_config.json
+campus_network.json
 ysunetlogin_openwrt-source-*.zip
 build/
 build-fixed/

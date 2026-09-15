@@ -2,7 +2,12 @@ import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from netlogin import Netlogin
+from netlogin import Netlogin as _Netlogin
+
+
+class Netlogin(_Netlogin):
+    def __init__(self):
+        super().__init__(network_mode='system')
 
 
 def current_status(user='20260001', count=2):

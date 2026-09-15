@@ -206,14 +206,14 @@ def load_account_credentials(path, account_name):
 
 
 # 封装post请求
-def post(url, headers=None, data=None, timeout=DEFAULT_TIMEOUT):
+def post(url, headers=None, data=None, timeout=DEFAULT_TIMEOUT, transport=None):
     headers = headers or {}
     data = data or {}
     data = urlencode(data)
     if VERSION == 3:
         data = data.encode('utf-8')
         request = urllib.request.Request(url, headers=headers, data=data)
-        response = build_direct_opener().open(request, timeout=timeout)
+        response = build_direct_opener(*(transport.handlers() if transport else [])).open(request, timeout=timeout)
     else:
         request = urllib2.Request(url, headers=headers, data=data)
         response = build_direct_opener().open(request, timeout=timeout)
@@ -222,14 +222,15 @@ def post(url, headers=None, data=None, timeout=DEFAULT_TIMEOUT):
 
 
 # 封装get请求
-def get(url, headers=None, timeout=DEFAULT_TIMEOUT, allow_redirects=True):
+def get(url, headers=None, timeout=DEFAULT_TIMEOUT, allow_redirects=True, transport=None):
     headers = headers or {}
     if VERSION == 3:
         request = urllib.request.Request(url, headers=headers)
+        handlers = transport.handlers() if transport else []
         if allow_redirects:
-            response = build_direct_opener().open(request, timeout=timeout)
+            response = build_direct_opener(*handlers).open(request, timeout=timeout)
         else:
-            opener = build_direct_opener(NoRedirectHandler())
+            opener = build_direct_opener(NoRedirectHandler(), *handlers)
             response = opener.open(request, timeout=timeout)
     else:
         request = urllib2.Request(url, headers=headers)
@@ -243,7 +244,7 @@ def get(url, headers=None, timeout=DEFAULT_TIMEOUT, allow_redirects=True):
 
 
 class Netlogin():
-    def __init__(self):
+    def __init__(self, network_mode='auto'):
         '''
         登陆服务
         0：校园网
@@ -271,6 +272,27 @@ class Netlogin():
         self.isLogined = None
         self.alldata = None
         self.queryString = None
+        self.network_mode = network_mode
+        self.network_report = None
+        self._transport = None
+        self._transport_ready = False
+
+    def _network_transport(self):
+        if sys.platform != 'win32' or self.network_mode == 'system':
+            return None
+        if not self._transport_ready:
+            from campus_network import inspect_network
+            self.network_report, self._transport = inspect_network()
+            self._transport_ready = True
+        if self._transport is None:
+            raise OSError(self.network_report.get('message') or '校园网卡直连检查失败')
+        return self._transport
+
+    def _get(self, url, **kwargs):
+        return get(url, transport=self._network_transport(), **kwargs)
+
+    def _post(self, url, **kwargs):
+        return post(url, transport=self._network_transport(), **kwargs)
 
     def _parse_json(self, response):
         try:
@@ -314,7 +336,7 @@ class Netlogin():
         :return: (是否已联网, 捕获到的认证 queryString)
         '''
         try:
-            res = get(url, headers=self.header, allow_redirects=False)
+            res = self._get(url, headers=self.header, allow_redirects=False)
             text = read_text(res)
             query = self._extract_query_string(res.geturl()) or self._extract_query_string(text)
             if query:
@@ -348,7 +370,7 @@ class Netlogin():
 
     def _get_online_user_info(self):
         try:
-            res = get(self.url + 'getOnlineUserInfo', headers=self.header)
+            res = self._get(self.url + 'getOnlineUserInfo', headers=self.header)
             return self._parse_json(res)
         except Exception:
             return {}
@@ -363,14 +385,18 @@ class Netlogin():
             return None
 
     def _new_cookie_openers(self):
+        transport = self._network_transport()
         if VERSION == 3:
             jar = http.cookiejar.CookieJar()
 
             def build(no_redirect=False):
                 handlers = [direct_proxy_handler(), urllib.request.HTTPCookieProcessor(jar)]
-                https_handler = self._https_handler()
-                if https_handler:
-                    handlers.append(https_handler)
+                if transport:
+                    handlers.extend(transport.handlers())
+                else:
+                    https_handler = self._https_handler()
+                    if https_handler:
+                        handlers.append(https_handler)
                 if no_redirect:
                     handlers.append(NoRedirectHandler())
                 return urllib.request.build_opener(*handlers)
@@ -610,9 +636,15 @@ class Netlogin():
         '''
         只读检查当前机器是否具备校园网查询上下文，不登录或下线任何账号。
         '''
-        openers = self._new_cookie_openers()
-        session_info = self._auth1_session_info(openers)
+        try:
+            openers = self._new_cookie_openers()
+            session_info = self._auth1_session_info(openers)
+        except Exception as error:
+            session_info = {'errors': [text_value(error)]}
         result = self._query_machine_result(session_info)
+        result['network'] = self.network_report
+        if self.network_report and not self.network_report.get('ok'):
+            result['message'] = self.network_report.get('message')
         proxy_schemes = configured_proxy_schemes()
         result['proxyDetected'] = bool(proxy_schemes)
         result['proxySchemes'] = proxy_schemes
@@ -664,8 +696,13 @@ class Netlogin():
         except Exception as e:
             status['errors'].append('tst_net: %s' % text_value(e))
 
-        openers = self._new_cookie_openers()
-        session_info = self._auth1_session_info(openers)
+        try:
+            openers = self._new_cookie_openers()
+            session_info = self._auth1_session_info(openers)
+        except Exception as error:
+            session_info = {'errors': [text_value(error)]}
+            status['errors'].append(text_value(error))
+        status['network'] = self.network_report
         status['auth1Session'] = session_info
         session_id = session_info.get('sessionId') or ''
 
@@ -705,6 +742,12 @@ class Netlogin():
             'internet-online-auth-unknown': '外网可达，但未拿到 auth1 认证会话',
         }
         print('状态：%s' % state_map.get(summary.get('state'), summary.get('state') or '未知'))
+        network = status.get('network') or {}
+        selected = network.get('selected') or {}
+        if selected:
+            print('认证直连网卡：%s（%s）' % (selected.get('name'), selected.get('source_ip')))
+        elif network and not network.get('ok'):
+            print('直连检查：%s' % network.get('message'))
         if summary.get('userId'):
             print('账号：%s' % summary.get('userId'))
         if summary.get('service'):
@@ -953,6 +996,17 @@ class Netlogin():
         return None
 
     def _find_auth1_portal_url(self, openers):
+        # Go straight to the campus portal before probing public web sites.
+        # Public internet can be reachable via a proxy before campus login.
+        try:
+            response = self._session_request(openers, AUTH1_HOST + '/',
+                                             headers=self.header)
+            portal_url = response.geturl()
+            if (urlsplit(portal_url).hostname == 'auth1.ysu.edu.cn' and
+                    self._query_dict(portal_url).get('sessionId')):
+                return portal_url
+        except (HTTPError, URLError, IOError):
+            pass
         for url in self.check_urls:
             try:
                 response = self._session_request(openers, url, headers=self.header,
@@ -1230,29 +1284,41 @@ class Netlogin():
     def _choose_service(self, service_list, service_type):
         if not isinstance(service_list, list) or not service_list:
             return None
-
-        preferred = text_value(self.services.get(service_type, service_type))
-
-        def item_order(item):
-            if isinstance(item, dict) and item.get('order') is not None:
-                return item.get('order')
-            return 10 ** 9
-
-        ordered = sorted(service_list, key=item_order)
-        for item in ordered:
+        matches = []
+        for item in service_list:
             if not isinstance(item, dict):
                 continue
             values = [text_value(item.get(k)) for k in ('value', 'key', 'name', 'serviceName')]
-            if preferred and preferred in values:
-                return item
+            if any(self._service_matches(value, service_type) for value in values):
+                matches.append(item)
+        # Missing or ambiguous operators must never silently select another plan.
+        return matches[0] if len(matches) == 1 else None
 
-        campus_text = text_value('校园')
-        for item in ordered:
-            if isinstance(item, dict):
-                summary = json.dumps(item, ensure_ascii=False)
-                if campus_text in text_value(summary):
-                    return item
-        return ordered[0]
+    def _service_matches(self, actual, requested):
+        expected = self.services.get(text_value(requested), text_value(requested))
+        aliases = {
+            '校园网': ('校园网',),
+            '中国移动': ('中国移动', '移动'),
+            '中国联通': ('中国联通', '联通'),
+            '中国电信': ('中国电信', '电信'),
+        }
+        actual = text_value(actual).strip()
+        return bool(actual and actual in aliases.get(expected, (expected,)))
+
+    def _verified_login_result(self, summary, user, service_type):
+        summary = summary or {}
+        if self._manual_target_matches(summary, user, service_type):
+            return (True, '认证成功；已核实服务：%s' % summary.get('service'))
+        requested = self.services.get(text_value(service_type), service_type)
+        if summary.get('online'):
+            return (False, '当前会话已在线，但未达到指定账号和运营商要求；'
+                    '请求服务：%s；实际服务：%s；账号匹配：%s。'
+                    '如需切换，请先 logout；并检查学校网页的可选服务、账号绑定和接入区域。' % (
+                        requested, summary.get('service') or '接口未返回',
+                        '是' if self._normalized_account(
+                            summary.get('userId') or summary.get('userName')) ==
+                        self._normalized_account(user) else '否或无法确认'))
+        return (False, '已提交认证，但无法核实指定账号和运营商在线：%s' % requested)
 
     def _service_value(self, service):
         if not isinstance(service, dict):
@@ -1322,7 +1388,16 @@ class Netlogin():
             selected = self._choose_service(services.get('data'), service_type)
             service_value = self._service_value(selected)
             if not service_value:
-                return (False, 'auth1 未获取到可用服务')
+                available = []
+                for item in services.get('data') or []:
+                    if isinstance(item, dict):
+                        labels = [text_value(item.get(key)) for key in
+                                  ('name', 'serviceName', 'value', 'key') if item.get(key)]
+                        available.append(' / '.join(labels))
+                return (False, 'auth1 未找到唯一匹配的指定服务：%s；服务器返回：%s；'
+                        '未改选其他服务' % (
+                            self.services.get(text_value(service_type), service_type),
+                            '、'.join(available) or '无可用服务'))
             result = self._session_json(openers, '/eportal/network/serviceLogin',
                                         {'sessionId': session_id,
                                          'service': service_value})
@@ -1330,20 +1405,19 @@ class Netlogin():
             if data.get('authResult') != 'success':
                 return (False, data.get('authMessage') or result.get('message') or '服务认证失败')
 
+        summary = {}
         for _ in range(5):
             online = self._session_json(openers,
                                         '/eportal/adaptor/getOnlineUserInfo?sessionId=' + session_id,
                                         method='GET')
             portal_info = (online.get('data') or {}).get('portalOnlineUserInfo') or {}
+            summary = self._auth1_status_summary({'online': online})
             if portal_info.get('result') == 'success':
                 self.isLogined = True
-                return (True, '认证成功')
+                if self._manual_target_matches(summary, user, service_type):
+                    return self._verified_login_result(summary, user, service_type)
             time.sleep(0.5)
-
-        self.tst_net()
-        if self.isLogined:
-            return (True, '认证成功')
-        return (False, 'auth1 已提交认证，但在线状态仍为未登录')
+        return self._verified_login_result(summary, user, service_type)
 
     def _find_portal_query_string(self):
         if self.queryString:
@@ -1358,7 +1432,7 @@ class Netlogin():
                 return None
 
         try:
-            res = get(self.portal, headers=self.header, allow_redirects=False)
+            res = self._get(self.portal, headers=self.header, allow_redirects=False)
             query = self._extract_query_string(read_text(res))
             if query:
                 self.queryString = query
@@ -1421,12 +1495,7 @@ class Netlogin():
         actual_user = self._normalized_account(
             summary.get('userId') or summary.get('userName'))
         expected_user = self._normalized_account(user)
-        actual_service = text_value(summary.get('service')).strip().lower()
-        expected_service = text_value(
-            self.services.get(text_value(service_type), service_type)).strip().lower()
-        service_matches = bool(
-            actual_service and expected_service and
-            (actual_service == expected_service or actual_service == text_value(service_type)))
+        service_matches = self._service_matches(summary.get('service'), service_type)
         return bool(summary.get('online') and actual_user == expected_user
                     and service_matches)
 
@@ -1436,6 +1505,11 @@ class Netlogin():
         Unlike heartbeat assessment, an unidentifiable existing session is not
         treated as success after the user explicitly requests a connection.
         '''
+        if not user or not pwd:
+            return (False, '用户名或密码为空')
+        service_type = text_value(service_type).strip()
+        if service_type not in self.services:
+            return (False, '运营商编号必须是 0、1、2 或 3')
         qualification = self.query_machine_status()
         if not qualification.get('ok'):
             return (False, qualification.get('message') or
@@ -1470,8 +1544,22 @@ class Netlogin():
         :param code:验证码
         :return:元祖第一项：是否认证状态；第二项：详细信息
         '''
-        if self.isLogined == None:
-            self.tst_net()
+        if not user or not pwd:
+            return (False, '用户名或密码为空')
+        type = text_value(type).strip()
+        if type not in self.services:
+            return (False, '运营商编号必须是 0、1、2 或 3')
+        if self.isLogined is not False:
+            current = self.current_status()
+            summary = current.get('summary') or {}
+            if not summary.get('online') and not current.get('auth1Session', {}).get('sessionId'):
+                online_info = self._get_online_user_info()
+                summary = self._auth1_status_summary({'online': {
+                    'data': {'portalOnlineUserInfo': online_info}}})
+            if summary.get('online'):
+                return self._verified_login_result(summary, user, type)
+            # Internet reachability is never evidence of campus authentication.
+            self.isLogined = False
         if self.isLogined == False:
             if user == '' or pwd == '':
                 return (False,'用户名或密码为空')
@@ -1497,24 +1585,27 @@ class Netlogin():
                 'passwordEncrypt':'false'
             }
 	    
-            res = post(self.url+'login',headers = self.header,data = self.data)
+            res = self._post(self.url+'login',headers = self.header,data = self.data)
             login_json = self._parse_json(res)
             self.userindex = login_json.get('userIndex')
             #self.info = login_json
             self.info = login_json.get('message', '认证接口返回异常')
             if login_json.get('result') == 'success':
-                return (True,'认证成功')
+                online_info = self._get_online_user_info()
+                summary = self._auth1_status_summary({'online': {
+                    'data': {'portalOnlineUserInfo': online_info}}})
+                return self._verified_login_result(summary, user, type)
             else:
                 return (False,self.info)
 
-        return (True,'已经在线')
+        return (False, '无法确认校园认证状态')
     def get_alldata(self):
         '''
         获取当前认证账号全部信息
         #！！！注意！！！#此操作会获得账号alldata['userId']姓名alldata['userName']以及密码alldata['password']
         :return:全部数据的字典格式
         '''
-        res = get('http://auth.ysu.edu.cn/eportal/InterFace.do?method=getOnlineUserInfo',headers = self.header)
+        res = self._get('http://auth.ysu.edu.cn/eportal/InterFace.do?method=getOnlineUserInfo',headers = self.header)
         try:
             self.alldata = self._parse_json(res)
         except ValueError as e:
@@ -1578,7 +1669,7 @@ class Netlogin():
             if self.alldata==None:
                 self.get_alldata()
 
-            res = get(self.url+'logout',headers = self.header)
+            res = self._get(self.url+'logout',headers = self.header)
             logout_json = self._parse_json(res)
             #self.info = logout_json
             self.info = logout_json.get('message', '认证接口返回异常')
@@ -1591,9 +1682,27 @@ class Netlogin():
             return (False,self.info)
 
 if __name__ == '__main__':
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')
     loger = Netlogin()
     l = len(sys.argv)
     name = sys.argv[0]
+    if l >= 2 and sys.argv[1] == 'wifi-scan':
+        from wifi_scan import main as wifi_scan_main
+        sys.argv = [name] + sys.argv[2:]
+        sys.exit(wifi_scan_main())
+    if l >= 2 and sys.argv[1] == 'campus-check':
+        try:
+            from campus_network import inspect_network, print_report
+            report, _ = inspect_network()
+            if '--json' in sys.argv[2:]:
+                print(json.dumps(report, ensure_ascii=False, indent=2))
+            else:
+                print_report(report)
+            sys.exit(0 if report.get('ok') else 1)
+        except Exception as error:
+            print(json.dumps({'ok': False, 'message': text_value(error)}, ensure_ascii=False))
+            sys.exit(1)
     if l >= 2 and sys.argv[1] == 'query-machine-status':
         result = loger.query_machine_status()
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -1641,7 +1750,7 @@ if __name__ == '__main__':
                 'message': text_value(e),
             }, ensure_ascii=False))
             sys.exit(2)
-    if l>=2 and sys.argv[1] in ('status', 'current-status'):
+    if l>=2 and sys.argv[1] in ('status', 'current-status', '--status', '--current-status'):
         status = loger.current_status()
         if '--json' in sys.argv[2:]:
             print(json.dumps(status, ensure_ascii=False, indent=2))
@@ -1712,10 +1821,10 @@ if __name__ == '__main__':
             print('出现错误!')
             print(info)
         sys.exit(0)
-    elif l==3:
-        state, info = loger.login(user=sys.argv[1], pwd=sys.argv[2], type='0')
-    elif l==4:
-        state, info = loger.login(user=sys.argv[1], pwd=sys.argv[2], type=sys.argv[3])
+    elif l in (3, 4) and not sys.argv[1].startswith('-'):
+        state, info = loger.login(
+            user=sys.argv[1], pwd=sys.argv[2],
+            type=sys.argv[3] if l == 4 else '0')
     else:
         print('登陆服务： 0.校园网 1.中国移动 2.中国联通 3.中国电信')
         print('格式：')
@@ -1723,15 +1832,16 @@ if __name__ == '__main__':
         print('安全登入：向标准输入传入 JSON，然后执行 %s login-stdin' % name)
         print('注销：%s logout ' % name)
         print('状态：%s current-status [--json] ' % name)
+        print('附近 Wi-Fi：%s wifi-scan [--json]' % name)
+        print('校园网卡直连检测：%s campus-check [--json]' % name)
         print('账号设备：%s account-status userid password [--json] ' % name)
         print('账号设备配置：%s account-status --accounts-file path --account-name name [--json] ' % name)
-        state, info = loger.login(user="", pwd="", type='3')
-        print(state, info)
-        sys.exit(0)
+        sys.exit(0 if l == 1 or sys.argv[1] in ('--help', '-h') else 2)
     if state:
         print(info)
     else:
         print('出现错误!')
         print(info)
+    sys.exit(0 if state else 1)
 
 

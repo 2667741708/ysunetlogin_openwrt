@@ -2,6 +2,10 @@
 
 适用版本：`2.1.4`；适用系统：Windows 10/11 x64。
 
+**2026-09-15 源码更新：** 指定运营商严格核验、物理网卡绑定直连、Wi-Fi 主动扫描与有线检测
+已加入最新源码，见 [更新日志](CHANGELOG.md) 和 [命令、安装及配置方法](CAMPUS_DIRECT_SETUP.md)。
+以下下载步骤对应已发布的 2.1.4 EXE；旧 EXE 不包含本次源码修复，需要重新构建。
+
 ## 1. 下载与启动
 
 1. 在 GitHub 仓库的 Releases 页面下载 `ysu-netlogin-healing-2.1.4-windows-x64.zip`。

@@ -12,6 +12,9 @@ $sourceInputs = @(
   (Join-Path $root 'desktop_gui.py'),
   (Join-Path $root 'heartbeat.py'),
   (Join-Path $root 'netlogin.py'),
+  (Join-Path $root 'campus_network.py'),
+  (Join-Path $root 'campus_adapters.ps1'),
+  (Join-Path $root 'wifi_scan.py'),
   $viewer
 )
 
@@ -33,6 +36,10 @@ $pyInstallerArgs = @(
   'cryptography'
   '--add-data'
   ((Join-Path $root 'netlogin.py') + ';.')
+  '--add-data'
+  ((Join-Path $root 'campus_adapters.ps1') + ';.')
+  '--add-data'
+  ((Join-Path $root 'campus_network.example.json') + ';.')
   '--add-binary'
   ($viewer + ';tools\TigerVNC')
   '--distpath'
