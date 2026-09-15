@@ -1,6 +1,8 @@
 # 校园网 0 与代理：D321 实机排查
 
-后续实测：[UDP 包路径与 Cloud WireGuard 追踪](CAMPUS_PACKET_TRACE.md)。原生云 WG 在校园网 0 下也未完成握手，具体丢弃规则尚未确认。
+后续实测：[UDP 包路径与 Cloud WireGuard 追踪](CAMPUS_PACKET_TRACE.md)、
+[Cloud 接收端实验](CLOUD_RECEIVER_EXPERIMENT.md)。本机无线校园网 0 的原生云 WG 握手未完成；
+D321 有线校园网 0 的普通 UDP/51820 已完成往返。具体丢弃规则尚未确认，不能认为所有 UDP 回包被拒绝。
 
 日期：2026-09-15。测试位置：教学区有线；系统：Windows。
 
@@ -96,6 +98,9 @@ TUIC 使用 QUIC；其连接路径与本次可用的 TCP/443 节点不同。
 自动支持新端口。字段含义见 [TUIC 官方配置说明](https://wiki.metacubex.one/config/proxies/tuic/)。
 
 ### 5. 已测通的射手座连接办法：经过 TCP/443 前置节点
+
+本节成功结果限于节点检测与实际网页 TCP 请求。后续应用 UDP 回显实验没有通过该组合的完整性验证，
+移动出口也出现大包回复不完整；不能将网页成功扩展为所有协议可用。
 
 在独立临时配置中，让射手座-A 使用香江-F 作为 `dialer-proxy`：
 
