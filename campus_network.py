@@ -4,9 +4,11 @@ No global proxy, DNS, route, or Wi-Fi connection settings are modified.
 """
 import concurrent.futures
 import http.client
+import html
 import ipaddress
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import socket
@@ -217,14 +219,31 @@ class BoundTransport:
     def probe(self):
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}),
                                              *self.handlers(ssl.create_default_context()))
+        # Some campus gateways silently ignore Python's default User-Agent.
+        opener.addheaders = [('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)')]
         # A valid campus session is stronger evidence than public internet reachability.
-        with opener.open('https://auth1.ysu.edu.cn/', timeout=self.timeout) as response:
-            url = urllib.parse.urlsplit(response.geturl())
-            params = urllib.parse.parse_qs(url.query)
-            if url.hostname != 'auth1.ysu.edu.cn' or not params.get('sessionId'):
-                raise OSError('认证入口可达，但未获得本机校园 sessionId')
-        return {'portal_reachable': True, 'campus_session_available': True,
-                'auth1_addresses': self.resolve('auth1.ysu.edu.cn')}
+        target = 'https://auth1.ysu.edu.cn/'
+        for _ in range(4):
+            with opener.open(target, timeout=self.timeout) as response:
+                url = urllib.parse.urlsplit(response.geturl())
+                params = urllib.parse.parse_qs(url.query)
+                if url.scheme == 'https' and url.hostname == 'auth1.ysu.edu.cn' and params.get('sessionId'):
+                    if params.get('userIp') and params['userIp'] != [self.address]:
+                        raise OSError('认证会话出口 IP 与所选物理网卡不一致')
+                    return {'portal_reachable': True, 'campus_session_available': True,
+                            'auth1_addresses': self.resolve('auth1.ysu.edu.cn')}
+                body = response.read(65536).decode('utf-8', errors='replace')
+            # The wired captive gateway returns a script redirect, not HTTP 302.
+            # Extract a URL without executing JavaScript or following arbitrary hosts.
+            match = re.search(r'''location(?:\.href)?\s*=\s*['"]([^'"]+)['"]''', body)
+            if not match:
+                break
+            target = urllib.parse.urljoin(response.geturl(), html.unescape(match.group(1)))
+            redirect = urllib.parse.urlsplit(target)
+            if (redirect.scheme != 'https' or redirect.hostname != 'auth1.ysu.edu.cn'
+                    or redirect.username or redirect.password or redirect.port not in (None, 443)):
+                raise OSError('认证页面返回非校园认证 HTTPS 跳转')
+        raise OSError('认证入口可达，但未获得本机校园 sessionId')
 
 
 def inspect_network(config=None, scan=None):
