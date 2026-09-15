@@ -800,6 +800,8 @@ class DesktopApp(tk.Tk):
         self.account_kick_selected_button.pack(side='left', padx=8)
         self.account_kick_all_button = ttk.Button(device_buttons, text='踢全部设备', command=self.kick_all_account_devices)
         self.account_kick_all_button.pack(side='left')
+        ttk.Button(device_buttons, text='查看完整详情', command=self.show_account_device_details).pack(
+            side='left', padx=(8, 0))
         self.account_device_hint = ttk.Label(
             right, text='先查询该账号在线设备，再按需下线。',
             foreground='#66736d', background='#fffdf7', wraplength=920,
@@ -807,7 +809,16 @@ class DesktopApp(tk.Tk):
         self.account_device_hint.grid(row=12, column=0, sticky='w')
         device_list_frame = ttk.Frame(right, style='Panel.TFrame')
         device_list_frame.grid(row=13, column=0, sticky='nsew', pady=(8, 0))
-        self.account_device_list = tk.Listbox(device_list_frame, height=7, exportselection=False)
+        columns = ('ip', 'hostname', 'service', 'deviceName', 'deviceType', 'onlineDuration', 'accessTime')
+        self.account_device_list = ttk.Treeview(
+            device_list_frame, columns=columns, show='headings', height=7, selectmode='extended')
+        for key, title, width in (
+                ('ip', '在线 IP', 150), ('hostname', '主机名', 200),
+                ('service', '实际运营商 / 服务', 180), ('deviceName', '设备名称', 160),
+                ('deviceType', '类型', 85), ('onlineDuration', '在线时长', 140),
+                ('accessTime', '上线时间', 180)):
+            self.account_device_list.heading(key, text=title)
+            self.account_device_list.column(key, width=width, minwidth=60, stretch=False)
         device_y_scroll = ttk.Scrollbar(device_list_frame, orient='vertical', command=self.account_device_list.yview)
         device_x_scroll = ttk.Scrollbar(device_list_frame, orient='horizontal', command=self.account_device_list.xview)
         self.account_device_list.configure(yscrollcommand=device_y_scroll.set, xscrollcommand=device_x_scroll.set)
@@ -818,6 +829,10 @@ class DesktopApp(tk.Tk):
         device_list_frame.rowconfigure(0, weight=1)
         self.account_device_list.bind('<MouseWheel>', self.scroll_account_devices)
         self.account_device_list.bind('<Shift-MouseWheel>', self.scroll_account_devices_horizontal)
+        self.account_device_list.bind('<Double-1>', self.show_account_device_details)
+        self.account_device_list.bind('<Return>', self.show_account_device_details)
+        right.bind('<Configure>', lambda event: self.account_device_hint.configure(
+            wraplength=max(220, event.width - 20)))
         right.columnconfigure(0, weight=1)
         right.rowconfigure(13, weight=1)
 
@@ -1152,7 +1167,7 @@ class DesktopApp(tk.Tk):
     def clear_account_devices(self, hint):
         self.account_devices = []
         if hasattr(self, 'account_device_list'):
-            self.account_device_list.delete(0, 'end')
+            self.account_device_list.delete(*self.account_device_list.get_children())
             self.account_device_hint.configure(text=hint)
 
     def selected_saved_account(self):
@@ -1183,13 +1198,63 @@ class DesktopApp(tk.Tk):
         parts = [
             '当前设备' if item.get('currentDevice') else '',
             item.get('ip') or '无 IP',
-            item.get('deviceName') or '未命名设备',
+            '主机名：' + (item.get('hostname') or '未知（接口未返回）'),
+            '设备名：' + (item.get('deviceName') or '未命名设备'),
             item.get('deviceType') or '未知类型',
-            item.get('service') or '',
+            '实际服务：' + (item.get('service') or '未知（接口未返回）'),
             item.get('onlineDuration') or '',
             item.get('accessTime') or '',
         ]
         return '  ·  '.join([part for part in parts if part])
+
+    @staticmethod
+    def account_device_values(item):
+        return (item.get('ip') or '未知', item.get('hostname') or '未知（接口未返回）',
+                item.get('service') or '未知（接口未返回）', item.get('deviceName') or '未命名设备',
+                item.get('deviceType') or '未知', item.get('onlineDuration') or '未知',
+                item.get('accessTime') or '未知')
+
+    @staticmethod
+    def account_device_details(item):
+        sources = {'findDevice': '学校设备接口', 'current-session': '当前出口认证会话',
+                   'local-machine': '查询机器的系统主机名（本机 IP 已核对）'}
+        rows = [('在线 IP', item.get('ip')), ('主机名', item.get('hostname')),
+                ('主机名来源', sources.get(item.get('hostnameSource'), '接口未返回')),
+                ('实际运营商 / 服务', item.get('service')),
+                ('服务来源', sources.get(item.get('serviceSource'), '接口未返回')),
+                ('设备名称（不等于主机名）', item.get('deviceName')),
+                ('设备类型', item.get('deviceType')), ('MAC', item.get('mac')),
+                ('上线时间', item.get('accessTime')), ('在线时长', item.get('onlineDuration')),
+                ('当前出口设备', '是' if item.get('currentDevice') else '未确认'),
+                ('设备标识', item.get('onlineUserUuid'))]
+        return '\n'.join('%s：%s' % (label, value or '未知（接口未返回）') for label, value in rows)
+
+    def show_account_device_details(self, event=None):
+        selected = self.account_device_list.selection()
+        if not selected:
+            return
+        text = '\n\n'.join(self.account_device_details(self.account_devices[int(index)]) for index in selected)
+        dialog = tk.Toplevel(self)
+        dialog.title('在线设备完整详情')
+        dialog.geometry('760x480')
+        dialog.minsize(420, 280)
+        frame = ttk.Frame(dialog, padding=12)
+        frame.pack(fill='both', expand=True)
+        content = tk.Text(frame, wrap='word', padx=8, pady=8)
+        scrollbar = ttk.Scrollbar(frame, orient='vertical', command=content.yview)
+        content.configure(yscrollcommand=scrollbar.set)
+        content.grid(row=0, column=0, sticky='nsew')
+        scrollbar.grid(row=0, column=1, sticky='ns')
+        content.insert('1.0', text)
+        content.configure(state='disabled')
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+
+        def copy_details():
+            self.clipboard_clear()
+            self.clipboard_append(text)
+
+        ttk.Button(frame, text='复制全部详情', command=copy_details).grid(row=1, column=0, sticky='w', pady=(8, 0))
 
     def scroll_account_devices(self, event):
         self.account_device_list.yview_scroll(int(-1 * (event.delta / 120)), 'units')
@@ -1261,6 +1326,10 @@ class DesktopApp(tk.Tk):
                         query_host['name'], summary.get('onlineDeviceCount', 0))
                     if summary.get('querySource') == 'current-session':
                         text += '；已复用该位置的当前认证会话'
+                    if summary.get('serviceUnknownCount'):
+                        text += '；%s 台设备的实际运营商接口未返回' % summary['serviceUnknownCount']
+                    if summary.get('hostnameUnknownCount'):
+                        text += '；%s 台设备的主机名未知' % summary['hostnameUnknownCount']
                     errors = result.get('errors') or []
                     if errors:
                         text += '；警告：%s' % '；'.join(errors)
@@ -1293,19 +1362,19 @@ class DesktopApp(tk.Tk):
 
     def show_account_devices(self, devices, hint):
         self.account_devices = list(devices)
-        self.account_device_list.delete(0, 'end')
-        for item in self.account_devices:
-            self.account_device_list.insert('end', self.account_device_display(item))
+        self.account_device_list.delete(*self.account_device_list.get_children())
+        for index, item in enumerate(self.account_devices):
+            self.account_device_list.insert('', 'end', iid=str(index), values=self.account_device_values(item))
         self.account_device_hint.configure(text=hint)
 
     def query_account_devices(self):
         self.run_account_device_async('query')
 
     def kick_selected_account_devices(self):
-        selected = self.account_device_list.curselection()
+        selected = self.account_device_list.selection()
         if not selected:
             return messagebox.showerror('缺少选择', '请先查询并选择要下线的设备。')
-        devices = [self.account_devices[index] for index in selected]
+        devices = [self.account_devices[int(index)] for index in selected]
         uuids = [item.get('onlineUserUuid') for item in devices if item.get('onlineUserUuid')]
         if not uuids:
             return messagebox.showerror('无法下线', '选中的设备没有 onlineUserUuid。')

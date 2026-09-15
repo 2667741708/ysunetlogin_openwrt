@@ -50,6 +50,12 @@ New-Item -ItemType Directory -Path $stage | Out-Null
 Copy-Item -LiteralPath $exe -Destination $stage
 Copy-Item -LiteralPath (Join-Path $root 'WINDOWS_LOCAL_SETUP.md') -Destination $stage
 Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination $stage
+Copy-Item -LiteralPath (Join-Path $root 'RELEASE_NOTES.md') -Destination $stage
+$commandDocName = -join ([char[]](0x547D, 0x4EE4, 0x5927, 0x5168))
+$commandDocPath = Join-Path $root ($commandDocName + '.md')
+Copy-Item -LiteralPath $commandDocPath -Destination $stage
+Copy-Item -LiteralPath (Join-Path $root 'CAMPUS_DIRECT_SETUP.md') -Destination $stage
+Copy-Item -LiteralPath (Join-Path $root 'campus_network.example.json') -Destination $stage
 $screenshots = Join-Path $root 'docs\screenshots\v2.1.0'
 if (Test-Path -LiteralPath $screenshots) {
   $screenshotTarget = Join-Path $stage 'docs\screenshots\v2.1.0'

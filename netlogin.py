@@ -10,6 +10,7 @@ import subprocess
 import time
 import ssl
 import io
+import socket
 
 
 if sys.version_info < (3, 0):
@@ -507,10 +508,13 @@ class Netlogin():
             service = (item.get('service') or item.get('serviceName') or
                        item.get('realServiceName') or item.get('operatorName') or
                        item.get('ispName') or item.get('productName') or '')
+            hostname = item.get('hostName') or item.get('hostname') or item.get('computerName') or ''
             brief_devices.append({
                 'ip': item.get('userIpv4') or item.get('nodeIp') or '',
                 'mac': item.get('userMac') or item.get('nodeMac') or '',
                 'deviceName': item.get('deviceName') or '',
+                'hostname': hostname,
+                'hostnameSource': 'findDevice' if hostname else 'not-returned-by-findDevice',
                 'deviceType': item.get('deviceType') or item.get('nodeType') or '',
                 'accessTime': item.get('accessTime') or item.get('authenticationTime') or '',
                 'onlineDuration': item.get('onlineDuration') or '',
@@ -520,6 +524,40 @@ class Netlogin():
                 'serviceSource': 'findDevice' if service else 'not-returned-by-findDevice',
             })
         return brief_devices
+
+    def _enrich_current_device(self, devices, summary, target_user=''):
+        current_ip = summary.get('userIp') or ''
+        current_user = summary.get('userId') or summary.get('userName') or ''
+        if not summary.get('online') or not current_ip or not current_user:
+            return devices
+        if target_user and self._normalized_account(current_user) != self._normalized_account(target_user):
+            return devices
+        # Only label the query machine's hostname when its actual source IP matches.
+        local_ip = ((self.network_report or {}).get('selected') or {}).get('source_ip')
+        if not local_ip and sys.platform != 'win32':
+            try:
+                probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    probe.connect(('10.11.0.1', 80))
+                    local_ip = probe.getsockname()[0]
+                finally:
+                    probe.close()
+            except OSError:
+                pass
+        for item in devices:
+            if item.get('ip') != current_ip:
+                continue
+            item['currentDevice'] = True
+            if not item.get('service') and summary.get('service'):
+                item['service'] = summary['service']
+                item['serviceSource'] = 'current-session'
+            if not item.get('hostname') and local_ip == current_ip:
+                try:
+                    item['hostname'] = socket.gethostname()
+                    item['hostnameSource'] = 'local-machine'
+                except OSError:
+                    pass
+        return devices
 
     def _auth1_status_summary(self, status):
         online_info = status.get('online') or {}
@@ -542,7 +580,7 @@ class Netlogin():
 
         brief_devices = self._brief_devices(online_devices)
 
-        return {
+        summary = {
             'state': state,
             'online': is_online,
             'message': portal_info.get('message') or online_info.get('message') or '',
@@ -556,6 +594,8 @@ class Netlogin():
             'deviceCount': len(brief_devices),
             'devices': brief_devices,
         }
+        self._enrich_current_device(brief_devices, summary)
+        return summary
 
     def _account_status_summary(self, status):
         devices_data = (status.get('devices') or {}).get('data') or {}
@@ -569,18 +609,8 @@ class Netlogin():
             'internetOnline': None,
             'auth1Session': status.get('auth1Session') or {},
         })
-        current_user = online_summary.get('userId') or online_summary.get('userName') or ''
-        current_service = online_summary.get('service') or ''
-        current_ip = online_summary.get('userIp') or ''
         target_user = status.get('account') or ''
-
-        for item in brief_devices:
-            if item.get('service'):
-                continue
-            if (current_service and current_ip and item.get('ip') == current_ip
-                    and (not target_user or current_user == target_user)):
-                item['service'] = current_service
-                item['serviceSource'] = 'current-session'
+        self._enrich_current_device(brief_devices, online_summary, target_user)
 
         return {
             'account': target_user,
@@ -594,8 +624,10 @@ class Netlogin():
             'currentSession': online_summary,
             'serviceUnknownCount': len([item for item in brief_devices
                                         if not item.get('service')]),
-            'note': ('auth1 的 findDevice 设备列表当前未包含每台设备的运营商；'
-                     '只有当前出口设备可用 getOnlineUserInfo 补齐服务名。'),
+            'hostnameUnknownCount': len([item for item in brief_devices if not item.get('hostname')]),
+            'note': ('设备主机名与实际运营商优先使用接口返回值；'
+                     '当前出口设备可补齐会话服务，确认属于查询机器时可补齐本机主机名。'
+                     '其他设备未返回的字段显示“未知”，不会用账号配置的默认运营商代替。'),
         }
 
     def _normalized_account(self, value):
@@ -766,7 +798,7 @@ class Netlogin():
         print('在线设备数：%s' % summary.get('deviceCount', 0))
         for index, item in enumerate(summary.get('devices') or [], 1):
             parts = []
-            for key in ('ip', 'deviceName', 'deviceType', 'accessTime', 'onlineDuration'):
+            for key in ('ip', 'hostname', 'deviceName', 'deviceType', 'service', 'accessTime', 'onlineDuration'):
                 if item.get(key):
                     parts.append('%s=%s' % (key, item.get(key)))
             print('  %s. %s' % (index, ', '.join(parts) if parts else item))
@@ -961,7 +993,7 @@ class Netlogin():
         print('在线设备数：%s' % summary.get('onlineDeviceCount', 0))
         for index, item in enumerate(summary.get('devices') or [], 1):
             parts = []
-            for key in ('ip', 'deviceName', 'deviceType', 'accessTime', 'onlineDuration'):
+            for key in ('ip', 'hostname', 'deviceName', 'deviceType', 'accessTime', 'onlineDuration'):
                 if item.get(key):
                     parts.append('%s=%s' % (key, item.get(key)))
             service = item.get('service')

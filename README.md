@@ -6,6 +6,8 @@ Windows 自愈版的下载、SSH、账号绑定、心跳与开机启动配置见
 2026-09-15 的运营商严格匹配、物理网卡绑定直连、Wi-Fi 主动扫描和有线检测见：
 [校园网直连使用说明](CAMPUS_DIRECT_SETUP.md)。Windows 需要一并更新新增模块，不能只替换 netlogin.py。
 
+完整命令清单见 [命令大全](命令大全.md)；历次版本更新统一收录在 [更新说明](RELEASE_NOTES.md)，最新更新在最上方。
+
 ### 最新源码：快速使用
 
 从本仓库下载 ZIP 后完整解压，或在已有克隆目录拉取更新。在脚本所在目录执行：
@@ -33,7 +35,7 @@ Copy-Item -LiteralPath .\campus_network.example.json -Destination .\campus_netwo
 （也可指定 `WLAN` 或实际有线网卡名称），`timeout` 为 1–10 秒。
 个人配置 `campus_network.json` 不纳入 Git；已有配置时直接编辑，不必重复复制模板。
 
-更多示例见 [命令与配置说明](CAMPUS_DIRECT_SETUP.md)，版本变化见 [更新日志](CHANGELOG.md)。
+更多示例见 [命令与配置说明](CAMPUS_DIRECT_SETUP.md)，版本变化见 [更新日志](RELEASE_NOTES.md)。
 这是源码更新，旧版 EXE 需重新构建后才包含这些修复。
 
 这个项目提供了一个为燕山大学校园网设计的 OpenWrt 自动认证解决方案。它能够自动处理校园网的认证过程，使您的设备保持持续在线状态。
@@ -87,7 +89,7 @@ Copy-Item -LiteralPath .\campus_network.example.json -Destination .\campus_netwo
 
 如果服务器只提供校园网，应在同一电脑、同一网络的学校认证网页检查可选服务、账号绑定和接入区域。
 脚本不能通过填写运营商编号开通服务。移动在线状态已完成本机实测；其他运营商、
-有线接入和 TUN 过滤模式的验证范围见 [更新日志](CHANGELOG.md)。
+有线接入和 TUN 过滤模式的验证范围见 [更新日志](RELEASE_NOTES.md)。
 
 示例（将占位文字换成自己的信息；运营商编号 1/2/3 分别为移动/联通/电信）：
 
