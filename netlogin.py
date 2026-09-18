@@ -1731,7 +1731,8 @@ if __name__ == '__main__':
     name = sys.argv[0]
     if l >= 2 and sys.argv[1] in (
             'account-devices', 'account-history', 'device-offline',
-            'nosense-config', 'nosense-enable', 'nosense-register', 'nosense-disable'):
+            'nosense-config', 'nosense-enable', 'nosense-register', 'nosense-disable',
+            'account-traffic', 'account-menu', 'account-login'):
         from self_service import main as self_service_main
         sys.exit(self_service_main(loger, sys.argv[1:]))
     if l >= 2 and sys.argv[1] == 'wifi-scan':
@@ -1885,6 +1886,8 @@ if __name__ == '__main__':
         print('账号设备配置：%s account-status --accounts-file path --account-name name [--json] ' % name)
         print('自助中心：account-devices / account-history / device-offline / nosense-config / nosense-enable / nosense-register / nosense-disable')
         print('查看各命令参数：%s 命令 --help' % name)
+        print('账号菜单：%s account-menu；剩余流量：%s account-traffic 学号' % (name, name))
+        print('选择服务并查看流量：%s account-login 学号 --service 0/1/2/3' % name)
         sys.exit(0 if l == 1 or sys.argv[1] in ('--help', '-h') else 2)
     if state:
         print(info)

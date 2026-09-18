@@ -9,13 +9,68 @@ import getpass
 import json
 import re
 import sys
+from decimal import Decimal, InvalidOperation
 from urllib.parse import urljoin, urlsplit
 
 from netlogin import AUTH1_HOST, get_header, response_code, load_account_credentials
 
 BASE = '/sam/api/userself/'
 COMMANDS = ('account-devices', 'account-history', 'device-offline', 'nosense-config',
-            'nosense-enable', 'nosense-register', 'nosense-disable')
+            'nosense-enable', 'nosense-register', 'nosense-disable',
+            'account-traffic', 'account-menu', 'account-login')
+
+
+def flow_gb(value):
+    """Readable approximation of a school GB/MB description; never guess blanks."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    token = r'(\d+(?:\.\d+)?)\s*(TB|GB|MB|KB|B)'
+    matches = list(re.finditer(token, value, re.I))
+    if not matches or re.sub(token, '', value, flags=re.I).strip():
+        return None
+    powers = {'TB': 1, 'GB': 0, 'MB': -1, 'KB': -2, 'B': -3}
+    try:
+        total = sum(Decimal(m[1]) * Decimal(1024) ** powers[m[2].upper()] for m in matches)
+        return float(total)
+    except (InvalidOperation, OverflowError):
+        return None
+
+
+def traffic_summary(overview, flow):
+    if not isinstance(overview, dict) or not isinstance(flow, dict):
+        raise ValueError('学校未返回有效套餐流量数据；不能将其当作剩余 0 GB')
+    policy = overview.get('policyInfo') or {}
+    period = overview.get('periodInfo') or {}
+    rows = []
+
+    def collect(node, path, scope):
+        if not isinstance(node, dict):
+            return
+        scope = node.get('netserviceName') or node.get('serviceName') or scope
+        if 'totalFreeValueDesc' in node or 'leftFreeValueDesc' in node:
+            total_text, left_text = node.get('totalFreeValueDesc'), node.get('leftFreeValueDesc')
+            total, left = flow_gb(total_text), flow_gb(left_text)
+            rows.append({'name': node.get('name') or '流量额度', 'scope': scope,
+                         'sourcePath': path, 'totalText': total_text, 'remainingText': left_text,
+                         'totalGBApprox': total, 'remainingGBApprox': left,
+                         'usedGBApprox': total - left if total is not None and left is not None and total >= left else None,
+                         'usedPercent': node.get('usingPercentages')})
+        for key in ('availableFreeItems', 'chargeItems', 'netserviceDetailDescs'):
+            children = node.get(key)
+            if isinstance(children, list):
+                for index, child in enumerate(children):
+                    collect(child, '%s.%s[%s]' % (path, key, index), scope)
+
+    collect(flow, 'package/flow', '学校账号套餐（未按运营商拆分）')
+    return {'packageName': policy.get('packageName') or '未知套餐',
+            'billingRule': policy.get('periodAndTimeOrFlowDetail') or '',
+            'period': period.get('dateRangeDesc') or '周期未返回',
+            'usedText': (overview.get('usedInfo') or {}).get('usedFreeDesc') or '',
+            'items': rows, 'remainingKnown': any(r['remainingGBApprox'] is not None for r in rows),
+            'conversion': '近似 GB 按 1 GB = 1024 MB 换算，学校原始描述为准；不同额度不相加。',
+            'operatorTraffic': {'availability': 'not-returned',
+                                'message': '学校接口未提供移动、联通、电信各自独立套餐的剩余流量；不能用学校 60GB 额度代替。'},
+            'rawFlow': flow}
 
 
 def mac_address(value):
@@ -74,11 +129,68 @@ class SelfService:
             raise ValueError('自助中心未完成登录，请检查账号或学校登录要求')
         raise ValueError('自助中心登录跳转次数过多')
 
-    def request(self, suffix, data=None):
-        result = self.client._session_json(self.openers, BASE + suffix, data=data or {})
+    def request(self, suffix, data=None, method='POST'):
+        result = self.client._session_json(self.openers, BASE + suffix, data=data or {}, method=method)
         if result.get('code') != 200 or str(result.get('message', '')).lower() != 'ok':
             raise ValueError('自助中心接口失败：' + str(result.get('message') or result.get('code') or '未返回 JSON'))
         return result.get('data')
+
+    def traffic(self):
+        overview = self.request('package/overview', method='GET')
+        flow = self.request('package/flow', method='GET')
+        result = traffic_summary(overview, flow)
+        result.update(ok=True, account=self.user, changed=False,
+                      queriedAt=datetime.datetime.now(datetime.timezone.utc).isoformat())
+        result['note'] = '额度来自学校计费快照，可能延迟更新；切换运营商不会重置学校套餐额度。'
+        try:
+            summary = self.client.current_status().get('summary') or {}
+            result['currentSession'] = {k: summary.get(k) for k in ('online', 'userId', 'userIp', 'service')}
+            result['currentSession']['matchesQueriedAccount'] = self.client._normalized_account(
+                summary.get('userId')) == self.client._normalized_account(self.user)
+        except Exception:
+            result['currentSession'] = None
+            result['warnings'] = ['当前出口状态查询失败，以上额度仍属于所查账号']
+        return result
+
+    def login_and_traffic(self, password, service_type):
+        if service_type not in self.client.services:
+            raise ValueError('必须明确选择 0、1、2 或 3，不会默认回退校园网')
+        ok, message = self.client.ensure_login(self.user, password, service_type)
+        result = {'ok': bool(ok), 'account': self.user, 'requestedService': self.client.services[service_type],
+                  'loginVerified': bool(ok), 'message': message, 'traffic': None}
+        if ok:
+            try:
+                # Login may invalidate an existing self-service cookie session.
+                result['traffic'] = SelfService(self.client, self.user, password).traffic()
+            except Exception:
+                result['warnings'] = ['指定服务已登录并核实，但流量查询失败；稍后执行 account-traffic 重查。']
+        return result
+
+    def menu(self, password):
+        print('账号验证通过：%s' % self.user)
+        print('服务选择只改变本机当前校园连接。输入账号密码本身不会切换运营商。')
+        try:
+            print_result(self.traffic())
+        except Exception:
+            print('暂时无法查询流量，可稍后输入 t 重试；未改变当前连接。')
+        while True:
+            print('\n0 校园网 | 1 中国移动 | 2 中国联通 | 3 中国电信 | t 查询流量 | q 退出')
+            try:
+                choice = input('请选择：').strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print('\n已退出，保留当前连接。')
+                return 0
+            if choice == 'q':
+                return 0
+            try:
+                if choice in self.client.services:
+                    print_result(self.login_and_traffic(password, choice))
+                elif choice == 't':
+                    print_result(SelfService(self.client, self.user, password).traffic())
+                else:
+                    print('无效选择；未登录或切换任何服务。')
+            except Exception:
+                print('请求失败，请检查校园连接后重试；不会尝试其他运营商。')
 
     def devices(self, expected_service=None):
         data = self.request('devices')
@@ -192,7 +304,7 @@ class SelfService:
 
 
 def main(client, argv):
-    parser = argparse.ArgumentParser(prog='netlogin.py ' + argv[0], description='学校自助中心设备与历史查询')
+    parser = argparse.ArgumentParser(prog='netlogin.py ' + argv[0], description='学校自助中心：账号、服务选择、设备、流量与历史')
     parser.add_argument('username', nargs='?')
     parser.add_argument('password', nargs='?', help='省略时交互输入；也可使用 --stdin 或账号文件')
     auth = parser.add_mutually_exclusive_group()
@@ -201,7 +313,9 @@ def main(client, argv):
     parser.add_argument('--account-name', '--name', default='')
     parser.add_argument('--json', action='store_true')
     command = argv[0]
-    if command == 'account-devices':
+    if command == 'account-login':
+        parser.add_argument('--service', choices=sorted(client.services), required=True, help='明确选择 0 校园网、1 移动、2 联通、3 电信')
+    elif command == 'account-devices':
         parser.add_argument('--service', choices=sorted(client.services), help='核对指定运营商；仍列出未知设备')
     elif command == 'account-history':
         parser.add_argument('--page', type=int, default=1)
@@ -220,6 +334,8 @@ def main(client, argv):
             parser.add_argument('--expire', type=int, help='有效期数值，单位取自 nosense-config；省略使用学校上限')
         parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv[1:])
+    if command == 'account-menu' and (args.stdin or args.json):
+        parser.error('交互菜单不支持 --stdin / --json；自动调用请用 account-login 或 account-traffic')
     try:
         if (args.stdin or args.accounts_file) and (args.username or args.password):
             raise ValueError('账号文件/标准输入不能与位置账号密码混用')
@@ -230,11 +346,19 @@ def main(client, argv):
             user, password = load_account_credentials(args.accounts_file, args.account_name)
         else:
             user = args.username or ''
+            if not user and command == 'account-menu':
+                user = input('校园账号：').strip()
             if not user:
                 raise ValueError('请指定账号，或使用 --accounts-file / --stdin')
             password = args.password if args.password is not None else getpass.getpass('账号密码：')
         service = SelfService(client, user, password)
-        if command == 'account-devices':
+        if command == 'account-menu':
+            return service.menu(password)
+        if command == 'account-login':
+            result = service.login_and_traffic(password, args.service)
+        elif command == 'account-traffic':
+            result = service.traffic()
+        elif command == 'account-devices':
             result = service.devices(client.services.get(args.service))
         elif command == 'account-history':
             result = service.history(args.page, args.page_size, args.start, args.end, args.ip)
@@ -249,7 +373,7 @@ def main(client, argv):
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             print_result(result)
-        return 0
+        return 0 if result.get('ok') else 1
     except Exception as error:
         # Do not print transport URLs which can contain OAuth tickets or tokens.
         message = str(error) if isinstance(error, ValueError) else '自助中心请求失败（%s）；请检查校园直连和账号会话' % type(error).__name__
@@ -258,7 +382,32 @@ def main(client, argv):
 
 
 def print_result(result):
-    if 'devices' in result:
+    if 'loginVerified' in result:
+        print('指定服务：%s；%s' % (result['requestedService'], '登录已核实' if result['loginVerified'] else '登录失败或未核实'))
+        print(result['message'])
+        if result.get('traffic'):
+            print_result(result['traffic'])
+    elif 'items' in result:
+        print('学校账号：%s | 套餐：%s | 周期：%s' % (result['account'], result['packageName'], result['period']))
+        current = result.get('currentSession')
+        if current:
+            print('本机当前账号：%s | 实际服务：%s | 状态：%s' % (
+                current.get('userId') or '未知', current.get('service') or '未知',
+                '在线' if current.get('online') else '离线/未核实'))
+            if not current.get('matchesQueriedAccount'):
+                print('本机当前账号与查询账号不同；下面额度属于查询账号。')
+        for row in result['items']:
+            value = row['remainingGBApprox']
+            print('%s [%s]：剩余 %s%s / 总额 %s' % (
+                row['name'], row['scope'], row['remainingText'] or '未知',
+                '（约 %.2f GB）' % value if value is not None else '', row['totalText'] or '未知'))
+            if row['usedGBApprox'] is not None:
+                print('  已用约 %.2f GB' % row['usedGBApprox'])
+        if not result['items']:
+            print('学校未返回可识别的流量额度，不表示剩余 0 GB 或无限流量。')
+        print(result['conversion'])
+        print(result['operatorTraffic']['message'])
+    elif 'devices' in result:
         print('在线：%s 台；离线登记：%s 台' % (result['onlineDeviceCount'], result['offlineDeviceCount']))
         for item in result['devices']:
             print('%s | %s | %s | 实际服务=%s | 缺省服务=%s' % (
