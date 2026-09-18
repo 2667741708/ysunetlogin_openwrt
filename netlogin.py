@@ -500,7 +500,7 @@ class Netlogin():
 
         return info
 
-    def _brief_devices(self, online_devices):
+    def _brief_devices(self, online_devices, online=True):
         brief_devices = []
         for item in online_devices:
             if not isinstance(item, dict):
@@ -510,7 +510,10 @@ class Netlogin():
                        item.get('ispName') or item.get('productName') or '')
             hostname = item.get('hostName') or item.get('hostname') or item.get('computerName') or ''
             brief_devices.append({
-                'ip': item.get('userIpv4') or item.get('nodeIp') or '',
+                'online': online,
+                'state': 'online' if online else 'offline',
+                'stateSource': 'onlineDevices' if online else 'offlineDevices',
+                'ip': item.get('userIpv4') or item.get('nodeIp') or item.get('userIpv6') or '',
                 'mac': item.get('userMac') or item.get('nodeMac') or '',
                 'deviceName': item.get('deviceName') or '',
                 'hostname': hostname,
@@ -522,6 +525,12 @@ class Netlogin():
                 'onlineUserUuid': item.get('onlineUserUuid') or item.get('userObjectId') or '',
                 'service': service,
                 'serviceSource': 'findDevice' if service else 'not-returned-by-findDevice',
+                'bindNoSense': item.get('bindNoSense'),
+                'noSenseUuid': item.get('noSenseUuid') or '',
+                'noSenseEndTime': item.get('noSenseEndTime'),
+                'defaultServiceId': item.get('defaultServiceOperaporsConfigUuid') or '',
+                'authType': item.get('authType') or '',
+                'location': item.get('location') or '',
             })
         return brief_devices
 
@@ -621,6 +630,7 @@ class Netlogin():
             'onlineDeviceCount': len(brief_devices),
             'offlineDeviceCount': len(offline_devices),
             'devices': brief_devices,
+            'offlineDevices': self._brief_devices(offline_devices, online=False),
             'currentSession': online_summary,
             'serviceUnknownCount': len([item for item in brief_devices
                                         if not item.get('service')]),
@@ -992,7 +1002,7 @@ class Netlogin():
 
         print('在线设备数：%s' % summary.get('onlineDeviceCount', 0))
         for index, item in enumerate(summary.get('devices') or [], 1):
-            parts = []
+            parts = ['state=online']
             for key in ('ip', 'hostname', 'deviceName', 'deviceType', 'accessTime', 'onlineDuration'):
                 if item.get(key):
                     parts.append('%s=%s' % (key, item.get(key)))
@@ -1719,6 +1729,11 @@ if __name__ == '__main__':
     loger = Netlogin()
     l = len(sys.argv)
     name = sys.argv[0]
+    if l >= 2 and sys.argv[1] in (
+            'account-devices', 'account-history', 'device-offline',
+            'nosense-config', 'nosense-enable', 'nosense-register', 'nosense-disable'):
+        from self_service import main as self_service_main
+        sys.exit(self_service_main(loger, sys.argv[1:]))
     if l >= 2 and sys.argv[1] == 'wifi-scan':
         from wifi_scan import main as wifi_scan_main
         sys.argv = [name] + sys.argv[2:]
@@ -1868,6 +1883,8 @@ if __name__ == '__main__':
         print('校园网卡直连检测：%s campus-check [--json]' % name)
         print('账号设备：%s account-status userid password [--json] ' % name)
         print('账号设备配置：%s account-status --accounts-file path --account-name name [--json] ' % name)
+        print('自助中心：account-devices / account-history / device-offline / nosense-config / nosense-enable / nosense-register / nosense-disable')
+        print('查看各命令参数：%s 命令 --help' % name)
         sys.exit(0 if l == 1 or sys.argv[1] in ('--help', '-h') else 2)
     if state:
         print(info)
