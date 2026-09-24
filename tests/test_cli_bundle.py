@@ -2,7 +2,7 @@ import subprocess
 import sys
 import zipfile
 
-from build_cli_bundle import MODULES, build_bundle
+from build_cli_bundle import ASSETS, MODULES, build_bundle
 
 
 def test_cli_bundle_contains_required_modules(tmp_path):
@@ -12,6 +12,8 @@ def test_cli_bundle_contains_required_modules(tmp_path):
     assert "__main__.py" in names
     for module in MODULES:
         assert module in names
+    for asset in ASSETS:
+        assert asset in names
 
 
 def test_cli_bundle_version_and_help(tmp_path):

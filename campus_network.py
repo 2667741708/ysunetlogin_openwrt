@@ -16,10 +16,12 @@ import ssl
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 
 
 DEFAULTS = {'scan_wifi': True, 'preferred_ssid': 'iYanDa',
@@ -46,13 +48,39 @@ def load_config():
     return config
 
 
+def materialize_resource(name):
+    path = Path(__file__).with_name(name)
+    if path.is_file():
+        return path, None
+
+    archive = Path(sys.argv[0])
+    if not archive.is_file() or not zipfile.is_zipfile(str(archive)):
+        return path, None
+
+    with zipfile.ZipFile(str(archive)) as bundle:
+        content = bundle.read(name)
+    descriptor, temp_name = tempfile.mkstemp(
+        prefix='ysunetlogin-', suffix=Path(name).suffix)
+    with os.fdopen(descriptor, 'wb') as handle:
+        handle.write(content)
+    temp_path = Path(temp_name)
+    return temp_path, temp_path
+
+
 def adapter_inventory():
-    script = Path(__file__).with_name('campus_adapters.ps1')
+    script, cleanup_path = materialize_resource('campus_adapters.ps1')
     shell = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
-    result = subprocess.run(
-        [str(shell), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', str(script)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace',
-        timeout=45, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    try:
+        result = subprocess.run(
+            [str(shell), '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', str(script)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', errors='replace',
+            timeout=45, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    finally:
+        if cleanup_path is not None:
+            try:
+                cleanup_path.unlink()
+            except OSError:
+                pass
     if result.returncode:
         raise RuntimeError('无法读取物理网卡：' + result.stderr.strip())
     return json.loads(result.stdout.lstrip('\ufeff'))

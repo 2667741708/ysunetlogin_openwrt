@@ -6,6 +6,7 @@
 - `self_service.py`
 - `campus_network.py`
 - `wifi_scan.py`
+- `campus_adapters.ps1`（Windows 物理网卡检测资源）
 
 这些模块只使用 Python 标准库。服务器需要 Python 3，但用户运行时只需输入
 `netlogin`，不需要找到源码目录或手写 `python3 netlogin.py`。

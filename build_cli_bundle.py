@@ -19,6 +19,7 @@ MODULES = (
     "campus_network.py",
     "wifi_scan.py",
 )
+ASSETS = ("campus_adapters.ps1",)
 
 
 def source_version() -> str:
@@ -57,8 +58,8 @@ def build_bundle(output: Path, version: str | None = None) -> Path:
     with tempfile.TemporaryDirectory(
             prefix="netlogin-cli-", dir=output.parent) as temp_name:
         stage = Path(temp_name)
-        for module in MODULES:
-            shutil.copy2(ROOT / module, stage / module)
+        for name in MODULES + ASSETS:
+            shutil.copy2(ROOT / name, stage / name)
         (stage / "__main__.py").write_text(
             launcher(version), encoding="utf-8", newline="\n"
         )

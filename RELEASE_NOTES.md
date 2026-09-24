@@ -4,7 +4,7 @@
 
 ## 2026-09-25 — 单文件 `netlogin` 系统命令包
 
-- 新增 `build_cli_bundle.py`，将认证、自助中心、校园网卡检测和 Wi-Fi 扫描模块封装成单文件 Python zipapp。
+- 新增 `build_cli_bundle.py`，将认证、自助中心、校园网卡检测、Windows 网卡探测资源和 Wi-Fi 扫描模块封装成单文件 Python zipapp。
 - 命令包支持 `netlogin --version`，部署后可在任意目录直接运行，不再要求进入源码目录或手写 `python3`。
 - 新增 Linux 与 Windows 安装路径、校验及安全传递账号密码的说明。
 - 新增构建内容、版本输出和帮助入口的自动测试。
