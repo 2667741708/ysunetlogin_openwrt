@@ -45,7 +45,7 @@ if len(sys.argv) == 2 and sys.argv[1] in ("--version", "-V", "version"):
     print("netlogin " + BUNDLE_VERSION)
     raise SystemExit(0)
 
-runpy.run_module("netlogin", run_name="__main__", alter_sys=True)
+runpy.run_module("netlogin", run_name="__main__")
 '''
 
 

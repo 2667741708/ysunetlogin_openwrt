@@ -36,3 +36,4 @@ def test_cli_bundle_version_and_help(tmp_path):
     )
     assert help_result.returncode == 0
     assert "account-login" in help_result.stdout
+    assert "netlogin.py userid" not in help_result.stdout
