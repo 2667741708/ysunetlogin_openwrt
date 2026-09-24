@@ -24,7 +24,7 @@ MODULES = (
 def source_version() -> str:
     try:
         result = subprocess.run(
-            ["git", "describe", "--always", "--dirty"],
+            ["git", "rev-parse", "--short=12", "HEAD"],
             cwd=ROOT,
             check=True,
             capture_output=True,
