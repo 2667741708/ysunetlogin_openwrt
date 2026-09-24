@@ -3,6 +3,10 @@
 Windows 自愈版的下载、SSH、账号绑定、心跳与开机启动配置见：
 [Windows 本机使用与配置](WINDOWS_LOCAL_SETUP.md)
 
+需要在服务器任意目录直接运行 `netlogin` 时，请参阅
+[系统命令安装说明](CLI_INSTALL.md)。命令包会同时封装认证、自助中心、校园网卡检测
+和 Wi-Fi 扫描模块，不需要再进入源码目录执行 `python3 netlogin.py`。
+
 2026-09-15 的运营商严格匹配、物理网卡绑定直连、Wi-Fi 主动扫描和有线检测见：
 [校园网直连使用说明](CAMPUS_DIRECT_SETUP.md)。Windows 需要一并更新新增模块，不能只替换 netlogin.py。
 
