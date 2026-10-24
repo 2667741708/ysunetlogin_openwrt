@@ -28,7 +28,7 @@ from heartbeat import (
 from netlogin import Netlogin
 
 APP_NAME = 'YSUNetloginManager'
-APP_VERSION = '2.1.4'
+APP_VERSION = '2.2.0'
 CONFIG_VERSION = 6
 LOCAL_HOST_ID = 'local-windows'
 SERVICES = {'0': '校园网', '1': '中国移动', '2': '中国联通', '3': '中国电信'}
@@ -82,7 +82,7 @@ try:
         args = [sys.executable, handle.name, 'query-machine-status']
         child_input = None
     elif payload['action'] == 'logout':
-        args = [sys.executable, handle.name, 'logout']
+        args = [sys.executable, handle.name, 'logout', '--once']
         child_input = None
     elif payload['action'] == 'account-status':
         args = [sys.executable, handle.name, 'account-status-stdin']
@@ -92,7 +92,7 @@ try:
         child_input = json.dumps(dict(payload['account'],
             onlineUserUuids=payload.get('online_user_uuids')), ensure_ascii=False)
     else:
-        args = [sys.executable, handle.name, 'login-stdin']
+        args = [sys.executable, handle.name, 'login-stdin', '--once']
         child_input = json.dumps(payload['account'], ensure_ascii=False)
     completed = subprocess.run(args, input=child_input, text=True, capture_output=True,
                                encoding='utf-8', errors='replace', timeout=payload.get('timeout', 30))
@@ -396,6 +396,7 @@ def run_remote_script_file(host, action, account=None, timeout=30,
             'username': account['username'],
             'password': unprotect_secret(account['password']),
             'service': account['service'],
+            'auto_heartbeat': False,
         }, ensure_ascii=False)
     return subprocess.run(
         ssh_command(host, args), input=stdin, text=True, capture_output=True,
@@ -417,6 +418,7 @@ def run_embedded_netlogin(host, action, account=None, timeout=30,
             'username': account['username'],
             'password': unprotect_secret(account['password']),
             'service': account['service'],
+            'auto_heartbeat': False,
         }
     payload_b64 = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode('utf-8')).decode('ascii')
     remote_program = "PAYLOAD_B64 = %r\n%s\n" % (payload_b64, REMOTE_BOOTSTRAP)
@@ -537,12 +539,14 @@ def _run_local_unlocked(host, action, account=None, timeout=30):
     }
 
 
-def run_target(host, action, account=None, timeout=30):
+def run_target(host, action, account=None, timeout=30, is_current=None):
     """Serialize manual and heartbeat operations for one local or SSH target."""
     lock_key = host.get('id') or host.get('target') or 'unknown'
     with _REMOTE_LOCKS_GUARD:
         lock = _REMOTE_LOCKS.setdefault(lock_key, threading.Lock())
     with lock:
+        if is_current is not None and not is_current():
+            return {'ok': False, 'cancelled': True, 'internetOnline': True}
         if host.get('connection_type') == 'local' or host.get('id') == LOCAL_HOST_ID:
             if action == 'login':
                 preflight = _run_local_unlocked(
@@ -615,7 +619,7 @@ class DesktopApp(tk.Tk):
         self.build_ui()
         self.refresh_all()
         self.heartbeat_engine = HeartbeatEngine(
-            self.heartbeat_profiles, run_target, self.on_heartbeat_event)
+            self.heartbeat_profiles, self.run_heartbeat_target, self.on_heartbeat_event)
         self.heartbeat_engine.start()
         self.protocol('WM_DELETE_WINDOW', self.close_app)
 
@@ -692,7 +696,7 @@ class DesktopApp(tk.Tk):
         ).grid(row=0, column=0, columnspan=3, sticky='w')
         ttk.Label(
             frame,
-            text='每个目标使用“连接目标”页设置的默认账号。本机直接检测，远端通过 SSH；连续异常达到阈值后才会重连。',
+            text='登录成功后自动绑定本次账号并开启维护，无需另行设置。此页可查看记录或调整高级参数。',
             foreground='#66736d', background='#ffffff', wraplength=820,
         ).grid(row=1, column=0, columnspan=3, sticky='w', pady=(5, 18))
 
@@ -1017,6 +1021,13 @@ class DesktopApp(tk.Tk):
         if notify:
             messagebox.showinfo('心跳配置已保存', '%s：%s自动自愈心跳。' % (host['name'], state))
         return True
+
+    def run_heartbeat_target(self, host, action, account=None):
+        def is_current():
+            current = self.store.host(host.get('id'))
+            return bool(current and current.get('heartbeat_enabled') and
+                        current.get('account_id') == host.get('account_id'))
+        return run_target(host, action, account, is_current=is_current)
 
     def heartbeat_profiles(self):
         profiles = []
@@ -1688,7 +1699,13 @@ class DesktopApp(tk.Tk):
             except Exception as exc:
                 text = '执行失败：%s' % exc
             def finish():
-                self.set_output(text)
+                if succeeded and action == 'login':
+                    host['account_id'] = account['id']
+                    host['heartbeat_enabled'] = True
+                    self.store.save()
+                    self.load_heartbeat_form()
+                    self.heartbeat_engine.check_now(host.get('id') or host.get('target'))
+                self.set_output(text + ('\n已自动启用自愈心跳。' if succeeded and action == 'login' else ''))
                 if action == 'ssh-test':
                     self.set_host_test_output(text)
                     if succeeded:
@@ -1703,6 +1720,10 @@ class DesktopApp(tk.Tk):
         host, account = self.host_from_operation(), self.account_from_operation()
         if not host or not account:
             return messagebox.showerror('缺少配置', '请选择目标设备和校园网账号。')
+        if self.busy:
+            return
+        host['heartbeat_enabled'] = False
+        self.store.save()
         self.run_async('login', host, account)
 
     def status_selected(self):
@@ -1714,12 +1735,14 @@ class DesktopApp(tk.Tk):
         host = self.host_from_operation()
         if not host:
             return messagebox.showerror('缺少配置', '请选择目标设备。')
-        heartbeat_note = ''
-        if host.get('heartbeat_enabled'):
-            heartbeat_note = '\n\n这台主机已启用自愈心跳，稍后可能会按默认账号自动重新连接。'
+        heartbeat_note = '\n\n本次操作会同时停用该目标的自愈心跳。'
         if not messagebox.askyesno(
                 '确认下线', '让 %s 当前校园网会话下线？%s' % (host['name'], heartbeat_note)):
             return
+        host['heartbeat_enabled'] = False
+        self.store.save()
+        self.heartbeat_engine.wake()
+        self.load_heartbeat_form()
         self.run_async('logout', host)
 
     def test_host_form(self):

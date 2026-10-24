@@ -1726,15 +1726,25 @@ class Netlogin():
 if __name__ == '__main__':
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')
+    once = '--once' in sys.argv[1:]
+    if once:
+        sys.argv.remove('--once')
     loger = Netlogin()
+    heartbeat_result = None
     l = len(sys.argv)
     name = sys.argv[0]
+    if l == 2 and sys.argv[1] in ('heartbeat-status', 'heartbeat-stop'):
+        import auto_heartbeat
+        if sys.argv[1] == 'heartbeat-stop':
+            auto_heartbeat.stop()
+        print(json.dumps(auto_heartbeat.status(), ensure_ascii=False))
+        sys.exit(0)
     if l >= 2 and sys.argv[1] in (
             'account-devices', 'account-history', 'device-offline',
             'nosense-config', 'nosense-enable', 'nosense-register', 'nosense-disable',
             'account-traffic', 'account-menu', 'account-login'):
         from self_service import main as self_service_main
-        sys.exit(self_service_main(loger, sys.argv[1:]))
+        sys.exit(self_service_main(loger, sys.argv[1:], auto_maintain=not once))
     if l >= 2 and sys.argv[1] == 'wifi-scan':
         from wifi_scan import main as wifi_scan_main
         sys.argv = [name] + sys.argv[2:]
@@ -1784,14 +1794,20 @@ if __name__ == '__main__':
             service_type = text_value(payload.get('service', '')).strip()
             if service_type not in loger.services:
                 raise ValueError('运营商编号必须是 0、1、2 或 3')
-            state, info = loger.ensure_login(
-                user=user, pwd=pwd, service_type=service_type)
+            if once or payload.get('auto_heartbeat') is False:
+                state, info = loger.ensure_login(user=user, pwd=pwd, service_type=service_type)
+            else:
+                from auto_heartbeat import login as managed_login
+                state, info, heartbeat_result = managed_login(
+                    loger, user, pwd, service_type, ensure=True)
             print(json.dumps({
-                'ok': bool(state),
+                'ok': bool(state) and (heartbeat_result is None or heartbeat_result['ok']),
+                'loginOk': bool(state),
                 'message': text_value(info),
+                'heartbeat': heartbeat_result,
                 'service': loger.services.get(service_type, service_type),
             }, ensure_ascii=False))
-            sys.exit(0 if state else 1)
+            sys.exit(0 if state and (heartbeat_result is None or heartbeat_result['ok']) else 1)
         except Exception as e:
             print(json.dumps({
                 'ok': False,
@@ -1862,23 +1878,34 @@ if __name__ == '__main__':
             sys.exit(1)
         sys.exit(0)
     if l==2 and sys.argv[1]=='logout':
-        state,info = loger.logout()
+        if once:
+            state, info = loger.logout()
+        else:
+            from auto_heartbeat import logout as managed_logout
+            state, info = managed_logout(loger)
         if state:
             print(info)
         else:
             print('出现错误!')
             print(info)
-        sys.exit(0)
+        sys.exit(0 if state else 1)
     elif l in (3, 4) and not sys.argv[1].startswith('-'):
-        state, info = loger.login(
-            user=sys.argv[1], pwd=sys.argv[2],
-            type=sys.argv[3] if l == 4 else '0')
+        if once:
+            state, info = loger.login(
+                user=sys.argv[1], pwd=sys.argv[2], type=sys.argv[3] if l == 4 else '0')
+        else:
+            from auto_heartbeat import login as managed_login
+            state, info, heartbeat_result = managed_login(
+                loger, sys.argv[1], sys.argv[2], sys.argv[3] if l == 4 else '0')
     else:
         print('登陆服务： 0.校园网 1.中国移动 2.中国联通 3.中国电信')
         print('格式：')
         print('登入：%s userid password [service_type=校园网] ' % name)
         print('安全登入：向标准输入传入 JSON，然后执行 %s login-stdin' % name)
-        print('注销：%s logout ' % name)
+        print('登录成功后自动维护连接；无需设置开始或结束时间。')
+        print('心跳状态：%s heartbeat-status；停用：%s heartbeat-stop' % (name, name))
+        print('高级单次登录：在登录命令后添加 --once（不启动心跳）')
+        print('注销并停止心跳：%s logout ' % name)
         print('状态：%s current-status [--json] ' % name)
         print('附近 Wi-Fi：%s wifi-scan [--json]' % name)
         print('校园网卡直连检测：%s campus-check [--json]' % name)
@@ -1894,6 +1921,8 @@ if __name__ == '__main__':
     else:
         print('出现错误!')
         print(info)
-    sys.exit(0 if state else 1)
+    if heartbeat_result is not None:
+        print(heartbeat_result['message'])
+    sys.exit(0 if state and (heartbeat_result is None or heartbeat_result['ok']) else 1)
 
 

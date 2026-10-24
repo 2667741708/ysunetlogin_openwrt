@@ -155,9 +155,19 @@ class SelfService:
     def login_and_traffic(self, password, service_type):
         if service_type not in self.client.services:
             raise ValueError('必须明确选择 0、1、2 或 3，不会默认回退校园网')
-        ok, message = self.client.ensure_login(self.user, password, service_type)
+        heartbeat_result = None
+        if getattr(self, 'auto_maintain', False):
+            from auto_heartbeat import login
+            ok, message, heartbeat_result = login(
+                self.client, self.user, password, service_type, ensure=True)
+        else:
+            ok, message = self.client.ensure_login(self.user, password, service_type)
         result = {'ok': bool(ok), 'account': self.user, 'requestedService': self.client.services[service_type],
                   'loginVerified': bool(ok), 'message': message, 'traffic': None}
+        if heartbeat_result is not None:
+            result['heartbeat'] = heartbeat_result
+            result['ok'] = bool(ok and heartbeat_result['ok'])
+            result['message'] += '；' + heartbeat_result['message']
         if ok:
             try:
                 # Login may invalidate an existing self-service cookie session.
@@ -303,7 +313,7 @@ class SelfService:
         return result
 
 
-def main(client, argv):
+def main(client, argv, auto_maintain=False):
     parser = argparse.ArgumentParser(prog='netlogin.py ' + argv[0], description='学校自助中心：账号、服务选择、设备、流量与历史')
     parser.add_argument('username', nargs='?')
     parser.add_argument('password', nargs='?', help='省略时交互输入；也可使用 --stdin 或账号文件')
@@ -352,6 +362,7 @@ def main(client, argv):
                 raise ValueError('请指定账号，或使用 --accounts-file / --stdin')
             password = args.password if args.password is not None else getpass.getpass('账号密码：')
         service = SelfService(client, user, password)
+        service.auto_maintain = auto_maintain
         if command == 'account-menu':
             return service.menu(password)
         if command == 'account-login':

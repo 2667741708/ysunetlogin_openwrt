@@ -1,4 +1,20 @@
-# 燕山大学校园网 OpenWrt 自动认证方案
+# 燕山大学校园网自动登录与自愈心跳
+
+## 2026-10-24：登录成功后自动维护连接
+
+最新源码与重新构建的命令包默认执行“登录 → 自动启动后台心跳”。无需设置开始/结束时间、cron 或手动开启开关。
+
+- 每 60 秒检查一次，连续 2 次异常后重连，随后复查；持续失败逐渐延长等待，最长 15 分钟。
+- 正常连接保持不动；外网可达、门户暂时无法识别账号时保留连接。
+- 命令行心跳独立运行，退出 SSH/关闭终端仍会继续；重复登录更新账号，复用同一个用户级进程。
+- `netlogin logout` 会先停止心跳并删除重连凭据，再下线；`netlogin heartbeat-stop` 只停心跳，保留当前网络会话。
+- `netlogin heartbeat-status` 查询维护状态；登录命令加 `--once` 可仅执行一次认证。
+- Windows 桌面源码在连接成功后自动绑定该账号并启用应用内心跳，手动下线同时停用心跳。
+
+Linux 重连凭据保存在当前用户专用的 `~/.local/state/ysu-netlogin/`（目录 0700、配置 0600；支持 XDG_STATE_HOME）；Windows 命令行使用当前用户 DPAPI 加密，保存在 `%LOCALAPPDATA%/YSUNetlogin/heartbeat/`。凭据不会放进后台进程参数或状态输出。
+
+命令行后台进程与桌面程序内的心跳是两种运行方式。桌面心跳仍需应用保持运行；命令行心跳无需终端保持打开，但不等于安装开机服务，机器重启后下一次成功登录会重新启动。旧 EXE 不会因源码更新而获得新行为，需重新构建。
+
 
 Windows 自愈版的下载、SSH、账号绑定、心跳与开机启动配置见：
 [Windows 本机使用与配置](WINDOWS_LOCAL_SETUP.md)
@@ -77,99 +93,21 @@ Copy-Item -LiteralPath .\campus_network.example.json -Destination .\campus_netwo
 
 如果你的网络环境仍然使用旧认证接口，脚本会自动回退；如果已经升级到新 portal，则会优先走新流程。
 
-## 安装指南
+## 安装与登录
 
-### 2026-09-15：运营商选择与核验修复
+1. 完整下载或更新源码，保留 `netlogin.py`、`auto_heartbeat.py`、`heartbeat.py`、`campus_network.py`、`wifi_scan.py` 和 `campus_adapters.ps1` 等配套文件；也可以使用 [自包含命令包](CLI_INSTALL.md)。
+2. 使用 Python 3；新版认证的 AES 需要 PyCryptodome、cryptography 或系统 OpenSSL 之一。
+3. 接入燕山大学校园网后执行：
 
-旧版 `_choose_service()` 在指定运营商名称匹配失败时，会自动选择校园网或列表第一项；
-同时，登录流程只检查是否在线，导致选择 1/2/3 也可能显示“认证成功”但实际仍为校园网。
-
-- 现在只选择唯一匹配的服务，支持“中国移动 / 移动”“中国联通 / 联通”“中国电信 / 电信”。
-- 找不到指定服务或存在多个匹配时，显示服务器返回的服务名称并报错，不再自动改选校园网。
-- 新旧认证流程均核实在线账号和实际服务；服务不符或接口未返回服务时，不报告指定运营商登录成功。
-- 位置参数登录已在线时会核对账号和运营商；不一致会报错，需要先执行 `python netlogin.py logout` 再登录。
-  桌面端和 `login-stdin` 保留原有的显式连接时自动切换行为。
-- `python netlogin.py --status`、`--current-status` 与 `current-status` 均可查询状态；登录失败返回非零退出码。
-
-如果服务器只提供校园网，应在同一电脑、同一网络的学校认证网页检查可选服务、账号绑定和接入区域。
-脚本不能通过填写运营商编号开通服务。移动在线状态已完成本机实测；其他运营商、
-有线接入和 TUN 过滤模式的验证范围见 [更新日志](RELEASE_NOTES.md)。
-
-示例（将占位文字换成自己的信息；运营商编号 1/2/3 分别为移动/联通/电信）：
-
-```text
-python netlogin.py current-status
-python netlogin.py logout
-python netlogin.py "学号" "密码" 1
-python netlogin.py current-status
+```bash
+python3 netlogin.py "学号" "校园网密码" 1
 ```
 
-1. 将 `netlogin.py`、`auth.sh` 和 `daemon.sh` 文件上传到您的 OpenWrt 设备的 `/etc/storage/` 目录。
+最后的编号为 0 校园网、1 移动、2 联通、3 电信，必须是账号已开通的服务。Windows 可把 `python3` 换成 `python`。更推荐通过 `login-stdin` 从标准输入传递凭据，避免密码进入终端历史。
 
-2. 确保您的 OpenWrt 设备已安装 Python。新认证流程需要 AES 加密，脚本会优先使用 Python 的 `Crypto.Cipher.AES`，如果没有安装该库，则会调用系统 `openssl` 命令完成加密。
+出现“已自动启动后台自愈心跳”后即完成，运行 `python3 netlogin.py heartbeat-status` 可查看状态。无需设置重连时段或定时任务。若认证成功但心跳启动失败，会明确报告且命令返回非零退出码。
 
-3. 给予脚本执行权限：
-   ```
-   chmod +x /etc/storage/auth.sh /etc/storage/daemon.sh
-   ```
-
-## 配置说明
-
-### 配置 auth.sh
-
-1. 打开 `auth.sh` 文件进行编辑：
-   ```
-   vi /etc/storage/auth.sh
-   ```
-
-2. 在文件中找到以下行，并替换相应的信息：
-   ```bash
-   result=$(python "/etc/storage/netlogin.py" "你的学号" "你的校园网密码" "运营商编号")
-   ```
-   
-   将 "你的学号" 替换为您的学号，"你的校园网密码" 替换为您的校园网密码，"运营商编号" 替换为相应的数字：
-   - 0: 校园网
-   - 1: 中国移动
-   - 2: 中国联通
-   - 3: 中国电信
-
-3. 保存并退出文件。
-4. 如果您的 OpenWrt 设备重置网络适配器的方式不一致（如 18.06 以上的高版本系统），可能需要您重新编写一部分脚本。
-
-### 配置 daemon.sh
-
-1. 打开 `daemon.sh` 文件进行编辑：
-   ```
-   vi /etc/storage/daemon.sh
-   ```
-
-2. 根据需要调整以下参数：
-   - `start_hour` 和 `end_hour`：设置学校自动断网的时间段（默认配置即已适合燕山大学校园网环境）
-   - `max_attempts`：设置最大重试次数
-
-3. 配置其中含绝对路径的脚本文件路径（可选）：
-   ```shell
-   python /etc/storage/netlogin.py logout
-   /etc/storage/auth.sh # 将此处和上方替换为你认证脚本的位置
-   ```
-
-4. 保存并退出文件。
-
-### 设置定时任务
-
-为了确保脚本定期运行，我们需要设置 cron 任务：
-
-1. 打开 crontab 进行编辑：
-   ```
-   crontab -e
-   ```
-
-2. 添加以下行来每1分钟运行一次 daemon 脚本：
-   ```
-   */1 * * * * /etc/storage/daemon.sh
-   ```
-
-3. 保存并退出。
+OpenWrt 是主要用于路由器的开源 Linux 系统，只是一种可选部署环境。使用兼容设备时同样完整部署源码并登录，后台心跳会自动启动。旧 `daemon.sh` 现在仅查询状态，不再按小时跳过检测、重启路由器或重复认证；新部署不需要它。旧安装若仍有其他独立 timer/cron 守护，应在确认其用途后迁移，避免多套程序争用同一会话。
 
 ## 使用方法
 
@@ -265,9 +203,9 @@ SSH 用户有执行权限、账号密码有效，并且该账号确实开通了�
 流水线会依次运行自动测试、安全审计、PyInstaller 打包、EXE `--self-test`、发布目录审计、
 ZIP 压缩和 SHA256 生成。输出位于 `release/`，不会把本机账号配置、证书、SSH 私钥或构建缓存提交到 Git。
 
-### 单文件、单指令登录
+### 命令行登录并自动维护连接
 
-需要 `netlogin.py` 和 Python 3。新版 auth1 认证的 AES 加密还需要 PyCryptodome、`cryptography` 或 OpenSSL 命令之一；网络助手 Windows 桌面运行时已包含 `cryptography`，可直接使用该运行时。将源码复制到目标服务器后执行：
+需要完整源码或自包含命令包，以及 Python 3。新版 auth1 认证的 AES 加密还需要 PyCryptodome、`cryptography` 或 OpenSSL 命令之一；网络助手 Windows 桌面运行时已包含 `cryptography`，可直接使用该运行时。将源码复制到目标服务器后执行：
 
 ```bash
 python3 netlogin.py '校园网账号' '校园网密码' 1
@@ -402,25 +340,15 @@ sudo ./disable_systemd_autologin.sh
 
 脚本不会停止 `zerotier-one`，也不会停用 `netlogin-mutual-watchdog`。
 
-## 脚本说明
+## 脚本说明与排错
 
-### auth.sh
-这个脚本负责执行实际的认证过程。它调用 `netlogin.py` 进行认证，并在失败时重启网络适配器再次尝试。
+- `netlogin.py`：认证入口；命令行登录成功自动启动心跳，logout 同时停止。
+- `auto_heartbeat.py`：独立后台进程、单实例锁、受保护凭据、运行时副本与安全下线。
+- `heartbeat.py`：状态判断、连续异常阈值、重连验证和退避策略。
+- `auth.sh`：路由器环境的登录便捷入口，不再重置网卡或修改 TTL。
+- `daemon.sh`：旧入口兼容的只读状态查询，无需设置 cron。
 
-### daemon.sh
-这个脚本是主要的守护进程，它负责：
-- 检查当前时间是否在学校自动断网时间段内
-- 定期检查网络连接状态
-- 在需要时调用 `auth.sh` 进行认证
-- 如果多次认证失败，将重启路由器
-- 管理日志文件大小
-
-## 故障排除
-
-- 如果遇到认证问题，请检查您的学号、密码和运营商编号是否正确。
-- 确保 `netlogin.py`、`auth.sh` 和 `daemon.sh` 文件都存在且有正确的执行权限。
-- 检查 `/tmp/auth.log` 和 `/tmp/network_check.log` 文件以获取详细的错误信息。
-- 如果脚本在自动断网时间段内未按预期工作，请检查 `daemon.sh` 中的 `start_hour` 和 `end_hour` 设置。
+不能认证时先核对账号、已开通的服务和校园直连环境。`heartbeat-status` 中 enabled 表示已保存维护配置，running 表示后台进程持有实例锁；state 和 updated_at 表示最近检查阶段与更新时间。两者不等于校园网已认证，当前网络状态仍用 `current-status` 查询。
 
 ## 贡献
 

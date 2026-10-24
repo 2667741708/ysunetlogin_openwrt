@@ -15,3 +15,5 @@ build-demo/
 dist-demo/
 release/
 *.spec
+
+.test-tmp*/

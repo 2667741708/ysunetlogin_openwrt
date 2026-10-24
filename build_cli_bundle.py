@@ -15,6 +15,8 @@ import zipapp
 ROOT = Path(__file__).resolve().parent
 MODULES = (
     "netlogin.py",
+    "heartbeat.py",
+    "auto_heartbeat.py",
     "self_service.py",
     "campus_network.py",
     "wifi_scan.py",

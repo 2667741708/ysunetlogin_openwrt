@@ -3,6 +3,8 @@
 `netlogin` 命令包是一个 Python zipapp，内含以下运行模块：
 
 - `netlogin.py`
+- `auto_heartbeat.py`
+- `heartbeat.py`
 - `self_service.py`
 - `campus_network.py`
 - `wifi_scan.py`
@@ -59,3 +61,14 @@ netlogin query-machine-status
 
 账号密码优先通过 `login-stdin`、交互输入或受保护账号文件传递，不建议把密码直接
 写在命令历史中。
+
+## 登录后自动维护
+
+新命令包在登录成功后自动启动独立后台心跳，无需 cron、开始/结束时段或手动开启。每 60 秒检查，连续异常 2 次后重连并验证，持续失败最长退避 15 分钟。关闭 SSH 后继续运行；机器重启后需要下一次登录重新启动。
+
+```text
+netlogin heartbeat-status
+netlogin logout
+```
+
+logout 同时停止维护、删除重连凭据并下线。只想停维护用 heartbeat-stop；高级场景的一次性认证可给登录命令追加 --once。Linux 配置仅当前用户可读，Windows 密码使用当前用户 DPAPI 加密；运行状态不输出密码。
