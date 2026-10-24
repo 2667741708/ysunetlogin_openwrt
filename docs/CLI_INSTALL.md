@@ -1,4 +1,22 @@
-# `netlogin` 系统命令安装
+# 单文件安装与依赖
+
+## 普通用户
+
+从 [下载入口](https://github.com/2667741708/ysunetlogin_openwrt/releases/latest/download/netlogin.pyz) 保存 netlogin.pyz，不需要解压或下载其他项目文件：
+
+```bash
+python netlogin.pyz login
+```
+
+交互输入账号、密码和运营商；Linux 可使用 python3。认证成功后自动维护连接。可选校验文件 SHA256SUMS.txt 在同一发布页：Windows 用 Get-FileHash，Linux 用 sha256sum。
+
+Python 3 是运行环境。认证需要 AES：Windows 可使用系统 CNG；Linux 可使用系统 OpenSSL，或安装 Python cryptography / PyCryptodome。只有需要测试或构建时才安装 requirements-dev.txt。
+
+## 完整源码
+
+不要只下载 netlogin.py。完整解压仓库源码后，保持根目录模块及 campus_adapters.ps1 在一起，执行 python netlogin.py login。根目录业务模块被拆分是为了维护；单文件发布包已封装这些模块。
+
+## 开发者构建与系统命令安装
 
 `netlogin` 命令包是一个 Python zipapp，内含以下运行模块：
 
@@ -16,7 +34,7 @@
 ## 构建
 
 ```powershell
-python .\build_cli_bundle.py
+python .\scripts\build_cli_bundle.py
 python .\release\netlogin.pyz --version
 python .\release\netlogin.pyz --help
 ```

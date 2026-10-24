@@ -6,4 +6,4 @@ if [ "$#" -ne 1 ]; then
 fi
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 export YSU_GUI_PASSWORD=$1
-exec python3 "$SCRIPT_DIR/lan_gui.py" --config "$SCRIPT_DIR/lan_gui_config.json"
+exec python3 "$SCRIPT_DIR/../lan_gui.py" --config "$SCRIPT_DIR/../lan_gui_config.json"

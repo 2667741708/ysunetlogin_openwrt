@@ -1733,6 +1733,27 @@ if __name__ == '__main__':
     heartbeat_result = None
     l = len(sys.argv)
     name = sys.argv[0]
+    if l == 2 and sys.argv[1] == 'login':
+        import getpass
+        try:
+            user = input('校园网账号：').strip()
+            pwd = getpass.getpass('校园网密码（不显示）：')
+            service_type = input('服务编号（0 校园网 / 1 移动 / 2 联通 / 3 电信）：').strip()
+            if not user or not pwd or service_type not in loger.services:
+                raise ValueError('账号、密码不能为空，服务编号必须为 0、1、2 或 3')
+            from auto_heartbeat import login as managed_login
+            state, info, heartbeat_result = managed_login(
+                loger, user, pwd, service_type, ensure=True, once=once)
+            print(info)
+            if heartbeat_result is not None:
+                print(heartbeat_result['message'])
+            sys.exit(0 if state and (heartbeat_result is None or heartbeat_result['ok']) else 1)
+        except (KeyboardInterrupt, EOFError):
+            print('已取消登录。')
+            sys.exit(130)
+        except Exception as error:
+            print('登录未完成：%s' % (text_value(error) if isinstance(error, ValueError) else type(error).__name__))
+            sys.exit(2)
     if l == 2 and sys.argv[1] in ('heartbeat-status', 'heartbeat-stop'):
         import auto_heartbeat
         if sys.argv[1] == 'heartbeat-stop':
@@ -1900,6 +1921,7 @@ if __name__ == '__main__':
     else:
         print('登陆服务： 0.校园网 1.中国移动 2.中国联通 3.中国电信')
         print('格式：')
+        print('推荐：%s login（交互输入账号密码与运营商）' % name)
         print('登入：%s userid password [service_type=校园网] ' % name)
         print('安全登入：向标准输入传入 JSON，然后执行 %s login-stdin' % name)
         print('登录成功后自动维护连接；无需设置开始或结束时间。')

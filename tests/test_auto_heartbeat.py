@@ -146,3 +146,25 @@ def test_cli_success_automatically_arms_heartbeat_and_preserves_json():
             assert stopped.code == 0
     start.assert_called_once_with(client, 'student', 'test-only', '1', ensure=True)
     assert json.loads(output.getvalue())['heartbeat']['ok']
+
+
+def test_interactive_login_hides_password_and_automatically_starts():
+    original_build_class = builtins.__build_class__
+    client = mock.Mock()
+    client.services = {'1': '中国移动'}
+    def build_class(func, name, *bases, **kwargs):
+        cls = original_build_class(func, name, *bases, **kwargs)
+        return mock.Mock(return_value=client) if name == 'Netlogin' else cls
+    output = io.StringIO()
+    with mock.patch('builtins.__build_class__', side_effect=build_class), \
+            mock.patch.object(sys, 'argv', ['netlogin.py', 'login']), \
+            mock.patch('builtins.input', side_effect=['student', '1']), \
+            mock.patch('getpass.getpass', return_value='hidden-test-password'), \
+            mock.patch.object(auto, 'login', return_value=(True, 'verified', {'ok': True, 'message': 'started'})) as start, \
+            contextlib.redirect_stdout(output):
+        try:
+            runpy.run_path(str(Path(auto.__file__).with_name('netlogin.py')), run_name='__main__')
+        except SystemExit as stopped:
+            assert stopped.code == 0
+    start.assert_called_once_with(client, 'student', 'hidden-test-password', '1', ensure=True, once=False)
+    assert 'hidden-test-password' not in output.getvalue()

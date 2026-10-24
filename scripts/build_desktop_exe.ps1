@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'Stop'
-$root = $PSScriptRoot
+$root = Split-Path -Parent $PSScriptRoot
 $viewer = Join-Path (Split-Path -Parent $root) 'tools\TigerVNC\vncviewer64-1.16.2.exe'
-$audit = Join-Path $root 'security_audit.py'
+$audit = Join-Path $PSScriptRoot 'security_audit.py'
 if (-not (Test-Path -LiteralPath $viewer)) {
   throw "TigerVNC Viewer not found: $viewer"
 }
@@ -42,7 +42,7 @@ $pyInstallerArgs = @(
   '--add-data'
   ((Join-Path $root 'campus_adapters.ps1') + ';.')
   '--add-data'
-  ((Join-Path $root 'campus_network.example.json') + ';.')
+  ((Join-Path $root 'examples\campus_network.example.json') + ';.')
   '--add-binary'
   ($viewer + ';tools\TigerVNC')
   '--distpath'

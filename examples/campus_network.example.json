@@ -1,0 +1,6 @@
+{
+  "scan_wifi": true,
+  "preferred_ssid": "iYanDa",
+  "interface": "auto",
+  "timeout": 4
+}

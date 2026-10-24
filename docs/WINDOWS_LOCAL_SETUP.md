@@ -15,7 +15,7 @@
 
 程序无需另外安装 Python。账号配置保存在 `%APPDATA%\YSUNetloginManager\config.json`，账号密码由 Windows DPAPI 加密，只有保存它的当前 Windows 用户能够解密。
 
-![启动后选择本机 Windows](docs/screenshots/v2.1.0/01-local-target.jpg)
+![启动后选择本机 Windows](screenshots/v2.1.0/01-local-target.jpg)
 
 ## 2. 添加校园网账号
 
@@ -29,7 +29,7 @@
 不会再次提交 CAS 登录。查询结果只包含学校 `findDevice` 接口实际返回、且属于当前所选账号的
 会话；使用其他账号配置登录的服务器或电脑不会合并显示，需要切换到对应账号分别查询。
 
-![添加并选择脱敏示例账号](docs/screenshots/v2.1.0/02-account-config.jpg)
+![添加并选择脱敏示例账号](screenshots/v2.1.0/02-account-config.jpg)
 
 ## 3. 检查本机网络并使用指定账号连接
 
@@ -42,9 +42,9 @@
 
 2.1.4 的校园网探测和登录请求会绕过 Windows 系统代理、PAC 以及代理环境变量，因此普通的系统代理即使失效也不应阻断校园 Wi-Fi 认证。若使用 Clash、sing-box 等软件的 TUN/透明代理模式，流量可能在更低层被接管；此时仍需在代理规则中将 `auth.ysu.edu.cn`、`auth1.ysu.edu.cn`、`10.11.0.1` 和校园网段设置为直连。
 
-![检查本机网络状态](docs/screenshots/v2.1.0/04-local-status.jpg)
+![检查本机网络状态](screenshots/v2.1.0/04-local-status.jpg)
 
-![使用指定账号与运营商连接本机](docs/screenshots/v2.1.0/05-local-login.jpg)
+![使用指定账号与运营商连接本机](screenshots/v2.1.0/05-local-login.jpg)
 
 本机操作不需要 OpenSSH、远端 Python 或服务器。只有管理远端服务器时才需要下面的 SSH 配置。
 
@@ -81,7 +81,7 @@ ssh 你的SSH别名 hostname
 5. 远端 `netlogin.py` 路径可以留空；留空时使用 EXE 内置脚本，临时投递并在运行后删除。
 6. 登录成功后自动把本次账号绑定为该目标的默认账号；也可在高级设置中调整。远端目标可点击“测试 SSH”，本机目标可点击“检查本机功能”。
 
-![为本机目标绑定默认账号](docs/screenshots/v2.1.0/03-local-target-config.jpg)
+![为本机目标绑定默认账号](screenshots/v2.1.0/03-local-target-config.jpg)
 
 ## 6. 登录后自动启用自愈心跳
 

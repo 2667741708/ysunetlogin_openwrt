@@ -23,7 +23,7 @@
 - `campus_network.py`
 - `campus_adapters.ps1`
 - `wifi_scan.py`
-- `campus_network.example.json`（可选配置模板）
+- `examples/campus_network.example.json`（可选配置模板）
 
 Windows 建议使用 Python 3。此更新有新增依赖文件，不能只复制 netlogin.py。
 Linux / OpenWrt 不使用 Windows 网卡绑定模块，保留原有直连认证流程。
@@ -49,11 +49,11 @@ python netlogin.py "学号" "密码" 1
 
 ## 可配置项目
 
-默认自动扫描和网卡检查已开启。需要调整时，将 `campus_network.example.json`
+默认自动扫描和网卡检查已开启。需要调整时，将 `examples/campus_network.example.json`
 复制为同目录的 `campus_network.json`，例如：
 
 ```powershell
-Copy-Item -LiteralPath .\campus_network.example.json -Destination .\campus_network.json
+Copy-Item -LiteralPath .\examples\campus_network.example.json -Destination .\campus_network.json
 ```
 
 已有配置时直接编辑，不必再次复制模板。示例内容：
